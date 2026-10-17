@@ -1,0 +1,392 @@
+@import url('https://fonts.googleapis.com/css2?family=Siemreap&display=swap');
+
+* {
+  box-sizing: border-box;
+  margin: 0;
+  padding: 0;
+  font-family: 'Siemreap', 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+}
+
+body {
+  background-color: #f4f6f9;
+  color: #333;
+}
+
+.container {
+  max-width: 800px;
+  margin: 0 auto;
+  padding: 20px;
+}
+
+/* Header */
+.header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 15px 20px;
+  background: #ffffff;
+  border-radius: 12px;
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.05);
+  margin-bottom: 25px;
+}
+
+.logo {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  color: #2563eb;
+}
+
+.auth-section {
+  display: flex;
+  align-items: center;
+}
+
+.user-profile {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.avatar {
+  width: 34px;
+  height: 34px;
+  border-radius: 50%;
+  object-fit: cover;
+}
+
+/* Buttons */
+button {
+  cursor: pointer;
+  border: none;
+  border-radius: 8px;
+  font-weight: 600;
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  transition: all 0.2s ease;
+}
+
+button:hover {
+  opacity: 0.92;
+  transform: translateY(-1px);
+}
+
+button:active {
+  transform: translateY(0);
+}
+
+.btn-login {
+  background-color: #4285f4;
+  color: white;
+  padding: 8px 16px;
+}
+
+.btn-login-large {
+  background-color: #4285f4;
+  color: white;
+  padding: 12px 24px;
+  font-size: 16px;
+  margin-top: 15px;
+}
+
+.btn-logout {
+  background-color: #ef4444;
+  color: white;
+  padding: 6px 12px;
+  font-size: 13px;
+}
+
+.btn-generate {
+  background-color: #2563eb;
+  color: white;
+  padding: 12px 20px;
+  width: 100%;
+  justify-content: center;
+  font-size: 16px;
+}
+
+.btn-generate:disabled {
+  background-color: #93c5fd;
+  cursor: not-allowed;
+  transform: none;
+}
+
+.btn-download {
+  background-color: #10b981;
+  color: white;
+  padding: 10px 20px;
+  margin-top: 15px;
+  justify-content: center;
+}
+
+/* TTS Card & Form */
+.tts-card {
+  background: #ffffff;
+  padding: 25px;
+  border-radius: 12px;
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.05);
+}
+
+.form-group {
+  margin-bottom: 20px;
+}
+
+.form-group label {
+  display: block;
+  margin-bottom: 8px;
+  font-weight: 600;
+  color: #334155;
+}
+
+.select-lang,
+.textarea-input {
+  width: 100%;
+  padding: 12px;
+  border: 1px solid #d1d5db;
+  border-radius: 8px;
+  font-size: 15px;
+  outline: none;
+  transition: border-color 0.2s ease;
+  background-color: #fff;
+}
+
+.textarea-input {
+  resize: vertical;
+}
+
+.select-lang:focus,
+.textarea-input:focus {
+  border-color: #2563eb;
+  box-shadow: 0 0 0 3px rgba(37, 99, 235, 0.1);
+}
+
+/* Audio Result */
+.audio-result {
+  margin-top: 25px;
+  padding-top: 20px;
+  border-top: 1px solid #e5e7eb;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.audio-player {
+  width: 100%;
+  margin-top: 10px;
+  border-radius: 8px;
+}
+
+.login-prompt {
+  text-align: center;
+  background: white;
+  padding: 40px;
+  border-radius: 12px;
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.05);
+}
+
+.error-message {
+  color: #dc2626;
+  margin-bottom: 15px;
+  font-size: 14px;
+}
+
+.spinner {
+  animation: spin 1s linear infinite;
+}
+
+@keyframes spin {
+  from {
+    transform: rotate(0deg);
+  }
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+/* 💳 VIP Modal Payment Overlay */
+.modal-overlay {
+  position: fixed;
+  top: 0;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  background: rgba(15, 23, 42, 0.75);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 1000;
+  padding: 15px;
+  backdrop-filter: blur(4px);
+}
+
+.modal-content {
+  background: #ffffff;
+  border-radius: 16px;
+  padding: 25px;
+  max-width: 650px;
+  width: 100%;
+  max-height: 90vh;
+  overflow-y: auto;
+  position: relative;
+  box-shadow: 0 20px 25px -5px rgba(0, 0, 0, 0.1);
+}
+
+.modal-close {
+  position: absolute;
+  top: 15px;
+  right: 15px;
+  background: #f1f5f9;
+  border: none;
+  border-radius: 50%;
+  width: 32px;
+  height: 32px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+  color: #64748b;
+  transition: background 0.2s;
+}
+
+.modal-close:hover {
+  background: #e2e8f0;
+  color: #0f172a;
+}
+
+/* 📊 Pricing Grid */
+.pricing-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(170px, 1fr));
+  gap: 12px;
+  margin-bottom: 20px;
+}
+
+.pricing-card {
+  border: 1px solid #e2e8f0;
+  border-radius: 12px;
+  padding: 15px;
+  text-align: center;
+  background: #f8fafc;
+  position: relative;
+}
+
+.pricing-card.featured {
+  border: 2px solid #eab308;
+  background: #fefce8;
+}
+
+.pricing-card .badge {
+  position: absolute;
+  top: -10px;
+  left: 50%;
+  transform: translateX(-50%);
+  background: #eab308;
+  color: #fff;
+  font-size: 10px;
+  font-weight: bold;
+  padding: 2px 8px;
+  border-radius: 10px;
+  white-space: nowrap;
+}
+
+.pricing-card h3 {
+  margin: 5px 0;
+  font-size: 15px;
+  color: #1e293b;
+}
+
+.pricing-card .price {
+  font-size: 22px;
+  font-weight: bold;
+  color: #0f172a;
+}
+
+.pricing-card .price span {
+  font-size: 12px;
+  color: #64748b;
+}
+
+.pricing-card ul {
+  list-style: none;
+  padding: 0;
+  margin: 10px 0 0 0;
+  font-size: 12px;
+  color: #475569;
+}
+
+.pricing-card ul li {
+  margin-bottom: 5px;
+}
+
+/* 📲 QR Section */
+.qr-section {
+  text-align: center;
+  background: #f1f5f9;
+  padding: 15px;
+  border-radius: 12px;
+  margin-bottom: 20px;
+}
+
+.qr-section h4 {
+  margin: 0 0 10px 0;
+  font-size: 14px;
+  color: #334155;
+}
+
+.qr-box {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+}
+
+/* 💬 Contact Buttons */
+.contact-buttons {
+  text-align: center;
+}
+
+.btn-contact {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 10px 18px;
+  border-radius: 8px;
+  text-decoration: none;
+  font-weight: bold;
+  font-size: 13px;
+  color: #fff;
+  transition: opacity 0.2s, transform 0.2s;
+}
+
+.btn-contact.telegram {
+  background: #229ed9;
+}
+
+.btn-contact.gmail {
+  background: #ea4335;
+}
+
+.btn-contact:hover {
+  opacity: 0.9;
+  transform: translateY(-1px);
+}
+
+/* 📱 Responsive Mobile Tweaks */
+@media (max-width: 640px) {
+  .container {
+    padding: 12px;
+  }
+
+  .header {
+    padding: 12px;
+  }
+
+  .modal-content {
+    padding: 18px;
+  }
+
+  .pricing-grid {
+    grid-template-columns: 1fr;
+  }
+}

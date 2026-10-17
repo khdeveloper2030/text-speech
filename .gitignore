@@ -1,0 +1,20 @@
+# Node Modules (ទំហំធំ)
+node_modules/
+backend/node_modules/
+frontend/node_modules/
+
+# Environment Variables (សម្ងាត់)
+.env
+backend/.env
+frontend/.env
+*.env
+
+# Firebase / Service Keys (សម្ងាត់ខ្លាំង)
+backend/serviceAccountKey.json
+*.json
+!package.json
+!package-lock.json
+
+# Temporary files
+backend/temp/
+*.log
