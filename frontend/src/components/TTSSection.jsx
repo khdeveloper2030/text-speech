@@ -1,161 +1,123 @@
 import React from "react";
-import { Download, Sparkles, AlertCircle, RefreshCw, Crown } from "lucide-react";
+import { Download, RefreshCw, AlertCircle } from "lucide-react";
 
 export default function TTSSection({
-  t,
-  userUsage,
-  usagePercentage,
-  language,
-  setLanguage,
-  voiceType,
-  setVoiceType,
-  characterStyle,
-  setCharacterStyle,
-  text,
-  setText,
-  error,
-  loading,
-  progress,
-  handleGenerateTTS,
-  handleDownload,
-  audioUrl,
-  setShowUpgradeModal,
-  LANGUAGES,
-  VOICE_TYPES,
-  CHARACTER_STYLES
+  t, userUsage, usagePercentage, language, setLanguage, voiceType, setVoiceType,
+  characterStyle, setCharacterStyle, text, setText, error, loading, progress,
+  handleGenerateTTS, handleDownload, audioUrl, LANGUAGES,
+  VOICE_TYPES, CHARACTER_STYLES
 }) {
   const isUnlimited = userUsage.role === "admin" || userUsage.limit === -1;
 
   return (
     <div className="tts-card" style={{ maxWidth: "800px", margin: "24px auto", padding: "28px", background: "#ffffff", borderRadius: "16px", boxShadow: "0 10px 25px -5px rgba(0,0,0,0.05)" }}>
       
-      <div className="usage-bar-container" style={{ marginBottom: "20px", background: "#f8fafc", padding: "14px 18px", borderRadius: "12px", border: "1px solid #e2e8f0" }}>
-        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", fontSize: "13px", fontWeight: "bold", color: "#1e293b" }}>
-          <span>{t.dailyUsage || "ការប្រើប្រាស់ប្រចាំថ្ងៃ"}:</span>
-          <span style={{ color: isUnlimited ? "#16a34a" : "#2563eb" }}>
-            {isUnlimited 
-              ? `${userUsage.dailyUsed} / ♾️ (Admin Unlimited)` 
-              : `${userUsage.dailyUsed} / ${userUsage.limit} ${t.chars || "តួអក្សរ"}`}
-          </span>
+      {/* 1. Cumulative plan allowance meter: successful generation adds characters to used total. */}
+      <div className="usage-container" style={{ marginBottom: "20px" }}>
+        <div style={{ display: "flex", justifyContent: "space-between", marginBottom: "8px", fontSize: "14px", fontWeight: "bold" }}>
+          <span>{t.characters || "Characters in this request"}</span>
+          <span>{isUnlimited ? (t.unlimited || "Unlimited") : `${Number(userUsage.dailyUsed || 0).toLocaleString()} / ${Number(userUsage.limit).toLocaleString()}`}</span>
         </div>
         {!isUnlimited && (
-          <div style={{ background: "#e2e8f0", borderRadius: "10px", height: "8px", marginTop: "8px", overflow: "hidden" }}>
-            <div 
-              style={{ 
-                width: `${usagePercentage}%`, 
-                background: usagePercentage >= 90 ? "#ef4444" : "#2563eb", 
-                height: "100%", 
-                transition: "width 0.3s ease" 
-              }} 
-            />
-          </div>
-        )}
-        {userUsage.role === "free" && (
-          <div style={{ marginTop: "10px", textAlign: "right" }}>
-            <button 
-              onClick={() => setShowUpgradeModal(true)}
-              style={{ background: "#d97706", color: "#ffffff", border: "none", padding: "5px 12px", borderRadius: "6px", fontSize: "12px", fontWeight: "bold", cursor: "pointer", display: "inline-flex", alignItems: "center", gap: "4px" }}
-            >
-              <Crown size={12} /> Upgrade to VIP
-            </button>
+          <div style={{ width: "100%", height: "8px", background: "#e2e8f0", borderRadius: "10px", overflow: "hidden" }}>
+            <div style={{ width: `${Math.min(100, (Number(userUsage.dailyUsed || 0) / Math.max(1, userUsage.limit)) * 100)}%`, height: "100%", background: Number(userUsage.dailyUsed || 0) >= userUsage.limit ? "#ef4444" : "#2563eb", transition: "width 0.3s" }} />
           </div>
         )}
       </div>
 
-      <div className="options-grid" style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(180px, 1fr))", gap: "14px", marginBottom: "18px" }}>
-        <div className="option-group">
-          <label style={{ display: "block", fontSize: "12px", fontWeight: "bold", marginBottom: "6px", color: "#475569" }}>{t.selectLanguage || "ភាសា"}</label>
+
+
+      {/* 2. Language, voice and reading-style options */}
+
+      <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(200px, 1fr))", gap: "16px", marginBottom: "24px" }}>
+        <div>
+          <label style={{ display: "block", marginBottom: "8px", fontSize: "14px", fontWeight: "bold" }}>🌍 {t.selectLang || "Select language"}</label>
           <select value={language} onChange={(e) => setLanguage(e.target.value)} style={{ width: "100%", padding: "10px", borderRadius: "8px", border: "1px solid #cbd5e1" }}>
-            {LANGUAGES.map((l) => (
-              <option key={l.code} value={l.code}>{l.name}</option>
+            {LANGUAGES.map((lang) => (
+              <option key={lang.code} value={lang.code}>
+                {t.selectLang && t.selectLang.toLowerCase().includes("select")
+                  ? ({ km: "Khmer", en: "English", fr: "French", ja: "Japanese", zh: "Chinese", th: "Thai", vi: "Vietnamese" }[lang.code] || lang.name)
+                  : ({ km: "ខ្មែរ", en: "អង់គ្លេស", fr: "បារាំង", ja: "ជប៉ុន", zh: "ចិន", th: "ថៃ", vi: "វៀតណាម" }[lang.code] || lang.name)}
+              </option>
             ))}
           </select>
         </div>
-
-        <div className="option-group">
-          <label style={{ display: "block", fontSize: "12px", fontWeight: "bold", marginBottom: "6px", color: "#475569" }}>{t.selectVoice || "ប្រភេទសំឡេង"}</label>
+        <div>
+          <label style={{ display: "block", marginBottom: "8px", fontSize: "14px", fontWeight: "bold" }}>👤 {t.voiceType || "Voice type"}</label>
           <select value={voiceType} onChange={(e) => setVoiceType(e.target.value)} style={{ width: "100%", padding: "10px", borderRadius: "8px", border: "1px solid #cbd5e1" }}>
-            {VOICE_TYPES.map((v) => (
-              <option key={v.id} value={v.id}>{v.name}</option>
+            {VOICE_TYPES.map((voice) => (
+              <option key={voice.id} value={voice.id}>
+                {voice.id === "woman" ? (t.woman || voice.name) : (t.man || voice.name)}
+              </option>
             ))}
           </select>
         </div>
-
-        <div className="option-group">
-          <label style={{ display: "block", fontSize: "12px", fontWeight: "bold", marginBottom: "6px", color: "#475569" }}>{t.selectStyle || "រចនាប័ទ្ម"}</label>
+        <div>
+          <label style={{ display: "block", marginBottom: "8px", fontSize: "14px", fontWeight: "bold" }}>🎭 {t.readingStyle || "Reading style"}</label>
           <select value={characterStyle} onChange={(e) => setCharacterStyle(e.target.value)} style={{ width: "100%", padding: "10px", borderRadius: "8px", border: "1px solid #cbd5e1" }}>
-            {CHARACTER_STYLES.map((c) => (
-              <option key={c.id} value={c.id}>{c.name}</option>
+            {CHARACTER_STYLES.map((style) => (
+              <option key={style.id} value={style.id}>
+                {style.id === "general" ? (t.general || style.name) : style.id === "news" ? (t.news || style.name) : (t.story || style.name)}
+              </option>
             ))}
           </select>
         </div>
       </div>
 
-      <div className="textarea-container">
+      {/* Voice cloning option removed; standard TTS controls remain. */}
+
+      {/* 4. កន្លែងវាយអត្ថបទ (Textarea) */}
+      <div className="textarea-container" style={{ marginBottom: "20px" }}>
         <textarea
-          rows={6}
-          placeholder={t.placeholder || "បញ្ចូលអត្ថបទនៅទីនេះដើម្បីបម្លែងជាសំឡេង..."}
           value={text}
           onChange={(e) => setText(e.target.value)}
-          style={{ width: "100%", padding: "14px", borderRadius: "10px", border: "1px solid #cbd5e1", fontSize: "14px", resize: "vertical", boxSizing: "border-box" }}
+          placeholder={t.placeholder || "សូមបញ្ចូលអត្ថបទរបស់អ្នកនៅទីនេះ..."}
+          style={{ width: "100%", height: "150px", padding: "16px", borderRadius: "12px", border: "1px solid #cbd5e1", fontSize: "15px", resize: "vertical" }}
         />
-        <div style={{ textAlign: "right", fontSize: "12px", color: "#64748b", marginTop: "6px" }}>
-          {text.length} {t.chars || "តួអក្សរ"} {isUnlimited && "(Admin Unlimited Input)"}
+        <div style={{ textAlign: "right", fontSize: "12px", color: "#64748b", marginTop: "4px" }}>
+          {t.characters || "Characters"}: {text.length}
         </div>
       </div>
 
+      {/* 5. បង្ហាញ Error */}
       {error && (
-        <div style={{ display: "flex", alignItems: "center", gap: "8px", color: "#dc2626", background: "#fef2f2", border: "1px solid #fecaca", padding: "12px", borderRadius: "8px", marginTop: "14px", fontSize: "13px" }}>
+        <div style={{ padding: "12px", marginBottom: "20px", background: "#fef2f2", color: "#ef4444", borderRadius: "8px", display: "flex", alignItems: "center", gap: "8px", fontSize: "14px" }}>
           <AlertCircle size={18} /> {error}
         </div>
       )}
 
+      {/* 6. ប៊ូតុង Generate និង Progress Bar */}
+      <button 
+        onClick={handleGenerateTTS} 
+        disabled={loading}
+        style={{ width: "100%", padding: "14px", background: loading ? "#94a3b8" : "#2563eb", color: "#fff", border: "none", borderRadius: "8px", fontSize: "16px", fontWeight: "bold", cursor: loading ? "not-allowed" : "pointer", display: "flex", justifyContent: "center", alignItems: "center", gap: "8px" }}
+      >
+        {loading ? (
+          <>
+            <RefreshCw size={20} className="spin" /> {t.generating || "Generating..."}
+          </>
+        ) : (
+          t.generateBtn || "Generate speech"
+        )}
+      </button>
+
       {loading && (
-        <div style={{ marginTop: "16px" }}>
-          <div style={{ display: "flex", justifyContent: "space-between", fontSize: "12px", fontWeight: "bold", color: "#2563eb", marginBottom: "6px" }}>
-            <span style={{ display: "flex", alignItems: "center", gap: "6px" }}>
-              <RefreshCw className="spin" size={14} /> កំពុងបម្លែងសំឡេង...
-            </span>
-            <span>{progress}%</span>
-          </div>
-          <div style={{ background: "#e2e8f0", borderRadius: "10px", height: "10px", overflow: "hidden" }}>
-            <div 
-              style={{ 
-                width: `${progress}%`, 
-                background: "#2563eb", 
-                height: "100%", 
-                transition: "width 0.2s ease-in-out" 
-              }} 
-            />
-          </div>
+        <div style={{ marginTop: "16px", width: "100%", height: "6px", background: "#e2e8f0", borderRadius: "10px", overflow: "hidden" }}>
+          <div style={{ width: `${progress}%`, height: "100%", background: "#10b981", transition: "width 0.2s" }} />
         </div>
       )}
 
-      <div style={{ display: "flex", gap: "12px", marginTop: "20px" }}>
-        <button 
-          onClick={handleGenerateTTS} 
-          disabled={loading}
-          style={{ flex: 1, display: "flex", alignItems: "center", justifyContent: "center", gap: "8px", background: loading ? "#94a3b8" : "#2563eb", color: "#ffffff", padding: "14px", borderRadius: "10px", border: "none", fontWeight: "bold", fontSize: "15px", cursor: loading ? "not-allowed" : "pointer" }}
-        >
-          <Sparkles size={20} /> {loading ? "កំពុងដំណើរការ..." : t.generate || "បម្លែងជាសំឡេង"}
-        </button>
-
-        {audioUrl && (
+      {/* 7. លទ្ធផលសំឡេង និងប៊ូតុងទាញយក */}
+      {audioUrl && !loading && (
+        <div className="result-container" style={{ marginTop: "24px", padding: "20px", background: "#f8fafc", borderRadius: "12px", border: "1px solid #e2e8f0" }}>
+          <h3 style={{ margin: "0 0 12px 0", fontSize: "16px" }}>🔊 {t.outputTitle || "Generated audio"}</h3>
+          <audio src={audioUrl} controls style={{ width: "100%", marginBottom: "16px" }} />
           <button 
             onClick={handleDownload}
-            style={{ background: "#16a34a", color: "#ffffff", border: "none", padding: "14px 24px", borderRadius: "10px", fontWeight: "bold", cursor: "pointer", display: "flex", alignItems: "center", gap: "8px", fontSize: "14px" }}
+            style={{ width: "100%", padding: "12px", background: "#10b981", color: "#fff", border: "none", borderRadius: "8px", display: "flex", justifyContent: "center", alignItems: "center", gap: "8px", cursor: "pointer", fontWeight: "bold" }}
           >
-            <Download size={18} /> {t.download || "ទាញយក"}
+            <Download size={18} /> {t.download || "Download file"}
           </button>
-        )}
-      </div>
-
-      {audioUrl && (
-        <div style={{ marginTop: "22px", padding: "18px", background: "#f0fdf4", border: "1px solid #bbf7d0", borderRadius: "12px", textAlign: "center" }}>
-          <h4 style={{ margin: "0 0 10px 0", color: "#15803d", fontSize: "14px" }}>🎉 រកឃើញសំឡេងដែលបានបម្លែងរួចរាល់!</h4>
-          <audio controls src={audioUrl} style={{ width: "100%" }}>
-            Your browser does not support audio playback.
-          </audio>
         </div>
       )}
     </div>

@@ -1,5 +1,6 @@
 import React, { useState, useEffect } from "react";
-import { auth, signInWithGoogle, logout, db } from "./firebase";
+import { auth, signInWithGoogle, logout, db, storage } from "./firebase";
+import { ref as storageRef, uploadBytesResumable, getDownloadURL, deleteObject } from "firebase/storage";
 import { onAuthStateChanged } from "firebase/auth";
 import { 
   doc, 
@@ -9,36 +10,47 @@ import {
   updateDoc, 
   deleteDoc, 
   onSnapshot,
-  getDoc
+  getDoc,
+  getDocs,
+  query,
+  where,
+  serverTimestamp,
+  runTransaction
 } from "firebase/firestore";
-import { LogIn, X, Mail, Send, Database, User, Shield } from "lucide-react";
+import { LogIn, X, Mail, Send, Database, User, Shield, Crown } from "lucide-react";
 import { TRANSLATIONS } from "./translations";
 import Navbar from "./components/Navbar";
 import TTSSection from "./components/TTSSection";
 import AdminPanel from "./components/AdminPanel";
+import PlansLanding from "./components/PlansLanding";
 import "./App.css";
 
 export const formatGoogleDriveUrl = (url) => {
   if (!url) return "";
-  try {
-    let fileId = "";
-    if (url.includes("drive.google.com/file/d/")) {
-      fileId = url.split("drive.google.com/file/d/")[1]?.split("/")[0];
-    } else if (url.includes("id=")) {
-      fileId = url.split("id=")[1]?.split("&")[0];
-    } else if (url.includes("googleusercontent.com/d/")) {
-      fileId = url.split("googleusercontent.com/d/")[1]?.split("/")[0];
-    } else if (url.includes("drive.google.com/uc?")) {
-      const match = url.match(/[?&]id=([^&]+)/);
-      if (match) fileId = match[1];
-    }
-    if (fileId) {
-      return `https://drive.google.com/thumbnail?id=${fileId}&sz=w1000`;
-    }
-  } catch (e) {
-    console.error("URL Format Error:", e);
-  }
-  return url;
+  const value = String(url).trim();
+  // If this is already a Google-hosted direct image URL, preserve it first.
+  if (/^https?:\/\/lh[0-9]\.googleusercontent\.com\/d\//i.test(value)) return value;
+  const filePathMatch = value.match(/drive\.google\.com\/file\/d\/([^/?]+)/i);
+  const queryMatch = value.match(/[?&]id=([^&]+)/i);
+  const googleusercontentMatch = value.match(/googleusercontent\.com\/d\/([^/?]+)/i);
+  const fileId = (filePathMatch && filePathMatch[1]) || (queryMatch && queryMatch[1]) || (googleusercontentMatch && googleusercontentMatch[1]);
+  return fileId ? `https://lh3.googleusercontent.com/d/${encodeURIComponent(fileId)}=w1200` : value;
+};
+
+export const getGoogleDriveImageFallbacks = (url) => {
+  const original = String(url || "").trim();
+  if (!original) return [];
+  const idMatch = original.match(/drive\.google\.com\/file\/d\/([^/?]+)/i) || original.match(/[?&]id=([^&]+)/i) || original.match(/googleusercontent\.com\/d\/([^/?=]+)/i);
+  if (!idMatch) return [original];
+  const id = idMatch[1];
+  const urls = [];
+  // Try the configured URL itself first; this supports the exact lh3 URL in Firestore.
+  urls.push(original);
+  urls.push(`https://lh3.googleusercontent.com/d/${encodeURIComponent(id)}=w1200`);
+  urls.push(`https://lh3.googleusercontent.com/d/${encodeURIComponent(id)}=s1200`);
+  urls.push(`https://drive.google.com/thumbnail?id=${encodeURIComponent(id)}&sz=w1200`);
+  urls.push(`https://drive.google.com/uc?export=view&id=${encodeURIComponent(id)}`);
+  return [...new Set(urls)];
 };
 
 const LANGUAGES = [
@@ -51,11 +63,10 @@ const LANGUAGES = [
   { code: "vi", name: "វៀតណាម (Vietnamese)" },
 ];
 
+// Keep only the two voice types supported by the current TTS backend.
 const VOICE_TYPES = [
   { id: "woman", name: "👩 ស្រី (Woman)" },
   { id: "man", name: "👨 ប្រុស (Man)" },
-  { id: "girl", name: "👧 ក្មេងស្រី (Girl)" },
-  { id: "boy", name: "👦 ក្មេងប្រុស (Boy)" },
 ];
 
 const CHARACTER_STYLES = [
@@ -63,11 +74,13 @@ const CHARACTER_STYLES = [
   { id: "news", name: "📰 អានព័ត៌មាន (Reading News)" },
   { id: "story", name: "📖 អានរឿង (Story Telling)" },
 ];
-
 function App() {
   const [user, setUser] = useState(null);
+  const [authReady, setAuthReady] = useState(false);
   const [isAdmin, setIsAdmin] = useState(false);
-  const [currentTab, setCurrentTab] = useState("user");
+  const [currentTab, setCurrentTab] = useState(() => {
+    try { return sessionStorage.getItem("textSpeechCurrentTab") === "admin" ? "admin" : "user"; } catch { return "user"; }
+  });
   const [appLang, setAppLang] = useState("km");
   const [text, setText] = useState("");
   const [language, setLanguage] = useState("km");
@@ -82,9 +95,21 @@ function App() {
   const [dbProgress, setDbProgress] = useState(20);
 
   const [isLoggingIn, setIsLoggingIn] = useState(false);
+  const [vipLoginPending, setVipLoginPending] = useState(false);
   const [error, setError] = useState("");
   const [showUpgradeModal, setShowUpgradeModal] = useState(false);
+  const [showLoginModal, setShowLoginModal] = useState(false);
+  const [loginPlan, setLoginPlan] = useState("free");
+  const [pendingPaymentEmail, setPendingPaymentEmail] = useState("");
+  const [pendingPaymentUid, setPendingPaymentUid] = useState("");
+  const [paymentSubmitting, setPaymentSubmitting] = useState(false);
+  const [showPaymentSuccess, setShowPaymentSuccess] = useState(false);
+  const [paymentSubmitStage, setPaymentSubmitStage] = useState("");
+  const [paymentReceiptFile, setPaymentReceiptFile] = useState(null);
   const [billingCycle, setBillingCycle] = useState("monthly");
+  const [selectedVipPlan, setSelectedVipPlan] = useState("pro");
+  const [qrImageFailed, setQrImageFailed] = useState(false);
+  const [qrFallbackIndex, setQrFallbackIndex] = useState(0);
 
   const [userUsage, setUserUsage] = useState({
     role: "free",
@@ -94,22 +119,27 @@ function App() {
 
   const [paymentSettings, setPaymentSettings] = useState({
     docId: "h4syLlqcg33B60hE3b1B",
-    bankName: "ABA Bank",
-    accountNumber: "000 123 456",
-    qrCodeUrl: "https://drive.google.com/uc?export=view&id=1A2B3C4D5E6F7G8H9I0J",
+    bankName: "",
+    accountNumber: "",
+    qrCodeUrl: "https://lh3.googleusercontent.com/d/1xK0ufr7n0hYWBK9Fdr_JQAY35H1vqx6n",
     gmail: "seyhaemdev@gmail.com",
     telegram: "https://t.me/em_seyha",
-    pay_month: 10,
+    pay_month: 12,
     freeLimit: 200,
     vipProLimit: 10000,
-    vipProPrice: 1.00,
+    vipProPrice: 10,
     vipUnlimitedLimit: 50000,
-    vipUnlimitedPrice: 3.00,
-    yearlyDiscountPercent: 5
+    vipUnlimitedPrice: 50,
+    yearlyDiscountPercent: 10
   });
 
   const [paymentsList, setPaymentsList] = useState([]);
   const [usersList, setUsersList] = useState([]);
+
+
+  useEffect(() => {
+    try { sessionStorage.setItem("textSpeechCurrentTab", currentTab); } catch {}
+  }, [currentTab]);
 
   const t = TRANSLATIONS[appLang] || TRANSLATIONS.km;
   const BACKEND_URL = process.env.REACT_APP_BACKEND_URL || "http://localhost:5000";
@@ -142,7 +172,10 @@ function App() {
     });
 
     const unsubAuth = onAuthStateChanged(auth, async (currentUser) => {
+      setAuthReady(true);
       setUser(currentUser);
+      const authEmail = String(currentUser?.email || "").toLowerCase().trim();
+      if (authEmail === "seyhaemdev@gmail.com") { setIsAdmin(true); setCurrentTab("admin"); }
       setAudioUrl("");
       setText("");
       setError("");
@@ -152,47 +185,60 @@ function App() {
         const userEmail = currentUser.email ? currentUser.email.toLowerCase().trim() : "";
         const isMasterAdmin = userEmail === "seyhaemdev@gmail.com";
 
-        // 🔄 Sync Email Doc to UID Doc
+        // Sync Email Doc to UID Doc if exist
         const emailDocRef = doc(db, "Users", userEmail);
         const uidDocRef = doc(db, "Users", currentUser.uid);
 
         try {
-          const emailSnap = await getDoc(emailDocRef);
-          if (emailSnap.exists()) {
+          // Seed the UID document from the legacy email document only when the
+          // UID document does not exist. Never overwrite newer Admin-approved
+          // role/limit/usage values with stale data on every login.
+          const [uidSnap, emailSnap] = await Promise.all([getDoc(uidDocRef), getDoc(emailDocRef)]);
+          if (!uidSnap.exists() && emailSnap.exists()) {
             const emailData = emailSnap.data();
-            await setDoc(uidDocRef, {
-              ...emailData,
-              email: userEmail,
-              uid: currentUser.uid
-            }, { merge: true });
+            await setDoc(uidDocRef, { ...emailData, email: userEmail, uid: currentUser.uid }, { merge: true });
           }
         } catch (e) {
-          console.warn("Syncing Email doc to UID doc failed:", e);
+          console.warn("Legacy User document migration skipped:", e?.code || e?.message || e);
         }
 
-        // Listen Users Collection to find real-time changes
-        const unsubUsersList = onSnapshot(collection(db, "Users"), (snapshot) => {
-          const allUsers = snapshot.docs.map(d => ({ id: d.id, ...d.data() }));
-          setUsersList(allUsers);
-
-          const foundUser = allUsers.find(
-            u => u.id === currentUser.uid || (u.email && u.email.toLowerCase().trim() === userEmail)
-          );
-
+        const unsubUser = onSnapshot(uidDocRef, (docSnap) => {
           let role = isMasterAdmin ? "admin" : "free";
           let limit = isMasterAdmin ? -1 : (paymentSettings.freeLimit || 200);
           let dailyUsed = 0;
 
-          if (foundUser) {
-            role = foundUser.role || role;
-            dailyUsed = Number(foundUser.dailyUsed || 0);
-
-            const parsedLimit = Number(foundUser.dailyLimit);
+          if (docSnap.exists()) {
+            const data = docSnap.data();
+            const rawRole = String(data.role || role).toLowerCase().trim();
+            const isUnlimitedRole = rawRole === "vip unlimited" || rawRole === "vip_unlimited" || rawRole === "unlimited" || rawRole === "unlimited vip";
+            const isVipRole = rawRole === "vip" || rawRole === "vip pro" || rawRole === "vip_pro" || rawRole === "plus" || rawRole === "pro" || isUnlimitedRole;
+            const isVipTier = rawRole === "vip" || isUnlimitedRole;
+            role = rawRole === "administrator" ? "admin" : (isUnlimitedRole ? "vip unlimited" : (isVipRole ? (rawRole === "vip" ? "vip" : "plus") : rawRole));
+            // New cumulative field avoids resetting the allowance every day.
+            // Migrate today's legacy dailyUsed value only when charactersUsed is absent.
+            const todayKey = new Date().toISOString().split("T")[0];
+            const savedUsage = data.charactersUsed !== undefined
+              ? data.charactersUsed
+              : (String(data.lastUsedDate || "") === todayKey ? data.dailyUsed : 0);
+            dailyUsed = Math.max(0, Number(savedUsage || 0) || 0);
+            const parsedLimit = Number(data.dailyLimit);
 
             if (role === "admin" || isMasterAdmin) {
               limit = -1;
-            } else if (role === "vip") {
-              limit = (!isNaN(parsedLimit) && parsedLimit > 200) ? parsedLimit : (paymentSettings.vipProLimit || 10000);
+            } else if (isVipRole) {
+              // Total plan allowance: Plus = 10,000; VIP = 50,000 characters.
+              // Canonical tier defaults also repair older/stale User documents.
+              // Fixed plan defaults: Plus = 10,000 and VIP = 50,000.
+              // Per-user Admin overrides are applied only when customCharacterLimit is true.
+              const tierDefault = isVipTier ? 50000 : 10000;
+              // Approved yearly subscriptions store their full 12-month allowance.
+              // Keep explicit Admin overrides and older records working as before.
+              const savedTotalLimit = Number(data.totalCharacterLimit);
+              limit = data.customCharacterLimit === true && Number.isFinite(parsedLimit) && parsedLimit > 0
+                ? parsedLimit
+                : (Number.isFinite(savedTotalLimit) && savedTotalLimit > 0
+                    ? savedTotalLimit
+                    : tierDefault);
             } else if (!isNaN(parsedLimit) && parsedLimit > 0) {
               limit = parsedLimit;
             } else {
@@ -216,9 +262,19 @@ function App() {
 
         const unsubPayments = onSnapshot(collection(db, "payments"), (snapshot) => {
           setPaymentsList(snapshot.docs.map(d => ({ id: d.id, ...d.data() })));
+        }, (err) => {
+          console.error("Payments collection listener failed:", err.code, err.message);
+          if (isMasterAdmin) setError(`Payments Collection: ${err.code || "error"} — ${err.message || "Read failed"}`);
+        });
+
+        const unsubUsersList = onSnapshot(collection(db, "Users"), (snapshot) => {
+          const unique = new Map();
+          snapshot.docs.forEach(d => { const item = { id: d.id, ...d.data() }; const key = String(item.email || item.id).toLowerCase().trim(); if (!unique.has(key) || item.id === String(item.email || "").toLowerCase().trim()) unique.set(key, item); });
+          setUsersList([...unique.values()]);
         });
 
         return () => {
+          unsubUser();
           unsubPayments();
           unsubUsersList();
         };
@@ -249,6 +305,66 @@ function App() {
     }
   };
 
+  // VIP plans require Google sign-in plus either an approved payment for that
+  // plan or a matching VIP role assigned by the admin in Users collection.
+  const handleVipLogin = async (plan = "pro") => {
+    if (isLoggingIn) return;
+    const selectedPlan = plan === "unlimited" ? "unlimited" : "pro";
+    setSelectedVipPlan(selectedPlan);
+    setBillingCycle("monthly");
+    setQrImageFailed(false);
+    setQrFallbackIndex(0);
+    setIsLoggingIn(true);
+    setVipLoginPending(true);
+    try {
+      const signedInUser = auth.currentUser || await signInWithGoogle();
+      if (!signedInUser) {
+        setShowUpgradeModal(false);
+        return;
+      }
+      const email = String(signedInUser.email || "").toLowerCase().trim();
+      setPendingPaymentEmail(email);
+      setPendingPaymentUid(signedInUser.uid || "");
+      if (!email) throw new Error("Google account did not provide an email address.");
+      // Verify by UID-keyed User document. Reading Users/{email} may be denied by
+      // secure Firestore rules for normal users, so it must not block approved accounts.
+      const roleIsApproved = (data = {}) => {
+        const role = String(data.role || "").toLowerCase().replace(/[_-]/g, " ").trim();
+        const isAdminRole = role === "admin" || role === "administrator";
+        const isVipRole = ["vip", "vip unlimited", "unlimited", "unlimited vip"].includes(role);
+        const isPlusRole = ["plus", "pro", "vip pro"].includes(role);
+        // Plus approval must never unlock VIP. VIP requires VIP approval specifically.
+        if (!isAdminRole && !(selectedPlan === "unlimited" ? isVipRole : isPlusRole)) return false;
+        if (data.paymentStatus && String(data.paymentStatus).toLowerCase() === "unapproved") return false;
+        if (data.vipExpiresAt) {
+          const expiry = new Date(data.vipExpiresAt);
+          if (!Number.isNaN(expiry.getTime()) && expiry < new Date(new Date().toDateString())) return false;
+        }
+        return true;
+      };
+      const uidUserSnap = await getDoc(doc(db, "Users", signedInUser.uid));
+      const adminAssigned = uidUserSnap.exists() && roleIsApproved(uidUserSnap.data());
+      if (adminAssigned || email === "seyhaemdev@gmail.com") {
+        setShowUpgradeModal(false);
+        setShowLoginModal(false);
+        setVipLoginPending(false);
+      } else {
+        // Keep the Google session so the payment request can be written to Firestore.
+        // The centered payment modal stays in front until the user submits or closes it.
+        setShowUpgradeModal(true);
+        setVipLoginPending(false);
+      }
+    } catch (err) {
+      console.error("VIP login verification failed:", err);
+      // Keep the session when possible so a pending payment request can still be submitted.
+      setShowUpgradeModal(true);
+      setVipLoginPending(false);
+      setError("Could not verify VIP access. You can submit a pending payment request or retry.");
+    } finally {
+      setIsLoggingIn(false);
+    }
+  };
+
   const handleLogout = async () => {
     setAudioUrl("");
     setText("");
@@ -256,109 +372,256 @@ function App() {
     await logout();
   };
 
- const handleGenerateTTS = async () => {
-  if (!text.trim()) {
-    setError(t.errorText || "សូមបញ្ចូលអត្ថបទជាមុនសិន!");
-    return;
-  }
-  if (!user) {
-    setError("សូមចូលប្រើប្រាស់ (Login) ជាមុនសិន!");
-    return;
-  }
-
-  const currentTextLength = text.trim().length;
-  const newCalculatedUsed = userUsage.dailyUsed + currentTextLength;
-
-  // 1. ឆែកមើល Limit មុនពេលផ្ញើ Request
-  if (userUsage.limit !== -1 && newCalculatedUsed > userUsage.limit) {
-    const errorMsg = `អ្នកបានប្រើប្រាស់អស់ដែនកំណត់ប្រចាំថ្ងៃហើយ! (${newCalculatedUsed}/${userUsage.limit} តួអក្សរ)។ សូមទាក់ទងដំឡើងទៅ VIP ដើម្បីប្រើប្រាស់បន្ថែម!`;
-    setError(errorMsg);
-    if (userUsage.role !== "admin") {
-      setShowUpgradeModal(true);
+  const requestLogin = (plan = "free") => {
+    setLoginPlan(plan);
+    if (plan !== "free") {
+      setSelectedVipPlan(plan === "unlimited" ? "unlimited" : "pro");
+      setBillingCycle("monthly");
     }
-    return;
-  }
+    setShowLoginModal(true);
+  };
 
-  setLoading(true);
-  setProgress(15);
-  setError("");
-  setAudioUrl("");
+  const continueLogin = async () => {
+    setShowLoginModal(false);
+    if (loginPlan === "free") await handleLogin();
+    else await handleVipLogin(loginPlan);
+  };
 
-  const interval = setInterval(() => {
-    setProgress((prev) => (prev >= 85 ? 85 : prev + 15));
-  }, 250);
+  const handleSubmitPayment = async () => {
+    const currentUser = auth.currentUser;
+    const email = String(currentUser?.email || "").toLowerCase().trim();
+    if (!currentUser || !email) {
+      setShowLoginModal(true); setLoginPlan(selectedVipPlan); return;
+    }
+    if (!paymentReceiptFile) {
+      alert(appLang === "km" ? "សូម Upload បង្កាន់ដៃបង់ប្រាក់ជាមុនសិន។" : "Please upload your payment receipt first."); return;
+    }
+    if (paymentReceiptFile.size > 10 * 1024 * 1024) {
+      alert(appLang === "km" ? "ឯកសារធំពេក។ សូមប្រើរូបភាព ឬ PDF តូចជាង 10MB។" : "Receipt is too large. Please use an image or PDF under 10MB."); return;
+    }
+    if (paymentSubmitting) return;
+    setPaymentSubmitting(true);
+    setPaymentSubmitStage(appLang === "km" ? "កំពុងរក្សាទុកសំណើបង់ប្រាក់..." : "Saving payment request...");
+    setError("");
+    try {
+      const receiptFile = paymentReceiptFile;
+      const paymentRecord = {
+        email, uid: currentUser.uid, userId: currentUser.uid, userEmail: email,
+        packageName: `${selectedPlanName} ${billingCycle}`, plan: selectedVipPlan, billingCycle,
+        amount: Number(selectedPlanPrice.toFixed(2)), currency: "USD", status: "pending",
+        characterLimit: selectedPlanLimit * selectedPlanDuration,
+        totalCharacterLimit: selectedPlanLimit * selectedPlanDuration,
+        bankName: paymentSettings.bankName || "", createdAt: serverTimestamp(),
+        source: "khmer-tts-studio", receiptUrl: "", receiptPath: "", receiptFileName: receiptFile.name,
+        receiptContentType: receiptFile.type || "application/octet-stream"
+      };
+      // First commit the request to Firestore. Receipt upload must not block the success popup.
+      const paymentRef = await addDoc(collection(db, "payments"), paymentRecord);
+      setPaymentReceiptFile(null);
+      setShowUpgradeModal(false);
+      setShowPaymentSuccess(true);
+      setPaymentSubmitting(false);
+      setPaymentSubmitStage("");
 
-  try {
-    const idToken = await user.getIdToken();
-    const response = await fetch(`${BACKEND_URL}/api/tts`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ text, lang: language, voiceType, characterStyle, idToken }),
-    });
+      // Upload the receipt after the request exists. If Storage fails, Admin still sees Pending.
+      (async () => {
+        try {
+          const safeName = receiptFile.name.replace(/[^a-zA-Z0-9._-]/g, "_");
+          const receiptPath = `paymentReceipts/${currentUser.uid}/${Date.now()}-${safeName}`;
+          const receiptRef = storageRef(storage, receiptPath);
+          const uploadTask = uploadBytesResumable(receiptRef, receiptFile, { contentType: receiptFile.type || "application/octet-stream" });
+          const receiptSnapshot = await new Promise((resolve, reject) => {
+            const timeoutId = setTimeout(() => { uploadTask.cancel(); reject(new Error("Receipt upload timed out. Check Firebase Storage Rules and bucket configuration.")); }, 45000);
+            uploadTask.on("state_changed", () => {}, err => { clearTimeout(timeoutId); reject(err); }, () => { clearTimeout(timeoutId); resolve(uploadTask.snapshot); });
+          });
+          const receiptUrl = await getDownloadURL(receiptSnapshot.ref);
+          await updateDoc(paymentRef, { receiptUrl, receiptPath, receiptFileName: receiptFile.name, updatedAt: serverTimestamp() });
+        } catch (uploadError) {
+          console.error("Payment request saved, but receipt upload failed:", uploadError?.code, uploadError?.message);
+        }
+      })();
+    } catch (err) {
+      console.error("Payment submission failed:", { code: err?.code, message: err?.message, error: err });
+      const code = String(err?.code || "unknown");
+      const detail = String(err?.message || "Unknown Firebase error");
+      const message = appLang === "km" ? `មិនអាចរក្សាទុកសំណើបង់ប្រាក់បានទេ៖ ${code} — ${detail}` : `Could not save payment request: ${code} — ${detail}`;
+      setError(message); alert(message);
+    } finally {
+      setPaymentSubmitting(false); setPaymentSubmitStage("");
+    }
+  };
 
-    clearInterval(interval);
-    setProgress(100);
+  const handleSetPaymentStatus = async (payment, status) => {
+    if (status === "approved") return handleApprovePayment(payment);
+    try {
+      await updateDoc(doc(db, "payments", payment.id), { status, updatedAt: serverTimestamp() });
+      if (status === "unapproved") {
+        const email = String(payment.email || "").toLowerCase().trim();
+        if (email) {
+          await setDoc(doc(db, "Users", email), {
+            email, role: "free", dailyLimit: Number(paymentSettings.freeLimit) || 200,
+            totalCharacterLimit: Number(paymentSettings.freeLimit) || 200,
+            vipExpiresAt: "", paymentStatus: "unapproved"
+          }, { merge: true });
+          const uidCandidates = new Set([String(payment.uid || payment.userId || "").trim()]);
+          usersList.filter((u) => String(u.email || "").toLowerCase().trim() === email && u.id && u.id !== email)
+            .forEach((u) => uidCandidates.add(String(u.uid || u.id)));
+          for (const uid of uidCandidates) {
+            if (uid) await setDoc(doc(db, "Users", uid), {
+              email, uid, role: "free", dailyLimit: Number(paymentSettings.freeLimit) || 200,
+              totalCharacterLimit: Number(paymentSettings.freeLimit) || 200,
+              vipExpiresAt: "", paymentStatus: "unapproved"
+            }, { merge: true });
+          }
+        }
+      }
+    } catch (err) {
+      console.error("Payment status update failed:", err);
+      alert("Could not update payment status: " + (err.message || "Unknown error"));
+    }
+  };
 
-    const data = await response.json();
+  const handleDeletePayment = async (payment) => {
+    const confirmText = appLang === "km" ? "តើអ្នកចង់លុបកំណត់ត្រាបង់ប្រាក់នេះមែនទេ?" : "Delete this payment record?";
+    if (!window.confirm(confirmText)) return;
+    try {
+      await deleteDoc(doc(db, "payments", payment.id));
+      if (payment.receiptPath) {
+        try { await deleteObject(storageRef(storage, payment.receiptPath)); }
+        catch (storageError) { console.warn("Receipt file cleanup failed:", storageError); }
+      }
+    } catch (err) {
+      console.error("Payment delete failed:", err);
+      alert((appLang === "km" ? "មិនអាចលុបបាន៖ " : "Could not delete: ") + (err.message || "Unknown error"));
+    }
+  };
 
-    if (data.success && data.audioUrl) {
-      setAudioUrl(data.audioUrl);
+  const handleEditPayment = async (payment) => {
+    const nextAmount = window.prompt("Edit payment amount (USD):", String(payment.amount ?? ""));
+    if (nextAmount === null) return;
+    const amount = Number(nextAmount);
+    if (!Number.isFinite(amount) || amount < 0) {
+      alert("Please enter a valid amount.");
+      return;
+    }
+    const nextPackage = window.prompt("Edit package name:", String(payment.packageName || "Plus"));
+    if (nextPackage === null) return;
+    try {
+      await updateDoc(doc(db, "payments", payment.id), {
+        amount, packageName: nextPackage.trim(), updatedAt: serverTimestamp()
+      });
+    } catch (err) {
+      alert("Could not edit payment: " + (err.message || "Unknown error"));
+    }
+  };
 
-      // 🔑 2. បង្ខំអាប់ដេតតម្លៃ dailyUsed បូកបន្ថែមភ្លាមៗនៅលើ UI (ឧទាហរណ៍៖ 6 + 6 = 12)
-      setUserUsage((prev) => {
-        const updatedUsed = data.usage && data.usage.dailyUsed !== undefined 
-          ? Math.max(data.usage.dailyUsed, prev.dailyUsed + currentTextLength)
-          : prev.dailyUsed + currentTextLength;
+  const handleGenerateTTS = async () => {
+    if (!text.trim()) {
+      setError(t.errorText || "សូមបញ្ចូលអត្ថបទជាមុនសិន!");
+      return;
+    }
+    if (!user) {
+      setError(appLang === "km" ? "សូមចូលប្រើប្រាស់ជាមុនសិន!" : "Please sign in first.");
+      return;
+    }
 
-        return {
-          ...prev,
-          dailyUsed: updatedUsed,
-          limit: (data.usage && data.usage.limit && data.usage.limit > 200) ? data.usage.limit : prev.limit
-        };
+    const currentTextLength = text.trim().length;
+    // Character allowance is cumulative across successful generations until the plan allowance is used.
+    const usedCharacters = Math.max(0, Number(userUsage.dailyUsed) || 0);
+    const remainingCharacters = userUsage.limit === -1 ? Infinity : Math.max(0, userUsage.limit - usedCharacters);
+    if (userUsage.limit !== -1 && currentTextLength > remainingCharacters) {
+      const errorMsg = appLang === "km"
+        ? `អ្នកនៅសល់ ${remainingCharacters.toLocaleString()} តួអក្សរ ប៉ុន្តែអត្ថបទនេះមាន ${currentTextLength.toLocaleString()} តួអក្សរ។ សូមដំឡើងគម្រោង ឬទាក់ទង Admin។`
+        : `You have ${remainingCharacters.toLocaleString()} characters remaining, but this request has ${currentTextLength.toLocaleString()}. Upgrade your plan or contact Admin.`;
+      setError(errorMsg);
+      setShowUpgradeModal(true);
+      return;
+    }
+
+    setLoading(true);
+    setProgress(15);
+    setError("");
+    setAudioUrl("");
+
+    const interval = setInterval(() => {
+      setProgress((prev) => (prev >= 85 ? 85 : prev + 15));
+    }, 250);
+
+    try {
+      const idToken = await user.getIdToken();
+      
+      // Standard TTS only: send JSON to the speech API.
+      const response = await fetch(`${BACKEND_URL}/api/tts`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ text, lang: language, voiceType, characterStyle, idToken }),
       });
 
-      // 🔑 3. Update ផ្ទាល់ចូលទៅក្នុង Firestore ពី Frontend ដើម្បីធានាថាទិន្នន័យត្រូវបាន Save 100%
-      try {
-        const userDocRef = doc(db, "Users", user.uid);
-        await setDoc(userDocRef, {
-          email: user.email ? user.email.toLowerCase().trim() : "",
-          dailyUsed: newCalculatedUsed,
-          lastUsedDate: new Date().toISOString().split("T")[0]
-        }, { merge: true });
-      } catch (fsErr) {
-        console.warn("Direct Firestore update fallback:", fsErr);
-      }
+      clearInterval(interval);
+      setProgress(100);
 
-    } else {
-      setError(data.error || "មានបញ្ហាក្នុងការបម្លែងសំឡេង!");
-      if (data.limitExceeded && userUsage.role !== "admin") {
-        setShowUpgradeModal(true);
+      const data = await response.json();
+
+      if (data.success && data.audioUrl) {
+        setAudioUrl(data.audioUrl);
+        // Count only successful generations: e.g. 6 + 6 = 12, then +6 = 18.
+        let nextUsed = usedCharacters + currentTextLength;
+        try {
+          const usageRef = doc(db, "Users", user.uid);
+          nextUsed = await runTransaction(db, async (transaction) => {
+            const usageSnap = await transaction.get(usageRef);
+            const saved = usageSnap.exists() ? usageSnap.data() : {};
+            const persistedUsed = Math.max(
+              0,
+              Number(saved.charactersUsed ?? saved.dailyUsed ?? 0) || 0,
+              usedCharacters
+            );
+            const updatedUsed = persistedUsed + currentTextLength;
+            transaction.set(usageRef, {
+              charactersUsed: updatedUsed,
+              dailyUsed: updatedUsed,
+              lastUsedDate: new Date().toISOString().split("T")[0]
+            }, { merge: true });
+            return updatedUsed;
+          });
+        } catch (usageSaveError) {
+          // Keep the current session accurate, while reporting persistence failure
+          // in the console instead of hiding the successfully generated audio.
+          console.warn("Could not persist character usage:", usageSaveError?.code || usageSaveError?.message || usageSaveError);
+        }
+        setUserUsage((prev) => ({ ...prev, dailyUsed: nextUsed }));
+        if (userUsage.limit !== -1 && nextUsed >= userUsage.limit) {
+          setError(appLang === "km"
+            ? "អ្នកបានប្រើអស់ចំនួនតួអក្សររបស់គម្រោងហើយ។ សូមទាក់ទង Admin ដើម្បីបន្តប្រើប្រាស់។"
+            : "You have used all characters included in your plan. Please upgrade or contact the admin.");
+          setShowUpgradeModal(true);
+        }
+
+      } else {
+        setError(data.error || "មានបញ្ហាក្នុងការបម្លែងសំឡេង!");
+        // Do not open payment UI inside the signed-in TTS interface.
       }
+    } catch (err) {
+      clearInterval(interval);
+      console.error("Error generating TTS:", err);
+      setError(appLang === "km" ? "មិនអាចតភ្ជាប់ទៅកាន់ Server បានទេ!" : "Could not connect to the server.");
+    } finally {
+      setTimeout(() => { setLoading(false); setProgress(0); }, 400);
     }
-  } catch (err) {
-    clearInterval(interval);
-    console.error("Error generating TTS:", err);
-    setError("មិនអាចតភ្ជាប់ទៅកាន់ Server បានទេ!");
-  } finally {
-    setTimeout(() => {
-      setLoading(false);
-      setProgress(0);
-    }, 400);
-  }
-};
+  };
 
   const handleDownload = () => {
     if (!audioUrl) return;
     try {
       const a = document.createElement("a");
       a.href = audioUrl;
-      a.download = `speech_${language}_${voiceType}_${Date.now()}.mp3`;
+      a.download = `speech_${language}_${voiceType}_${Date.now()}.${audioUrl.startsWith("data:audio/wav") ? "wav" : "mp3"}`;
       document.body.appendChild(a);
       a.click();
       document.body.removeChild(a);
     } catch (err) {
       console.error("Download error:", err);
-      setError("មិនអាចទាញយកឯកសារបានទេ!");
+      setError(appLang === "km" ? "មិនអាចទាញយកឯកសារបានទេ!" : "Could not download the audio file.");
     }
   };
 
@@ -371,36 +634,101 @@ function App() {
       }
 
       const limitVal = Number(userData.dailyLimit);
-
-      if (userData.id) {
-        const userRef = doc(db, "Users", userData.id);
-        await updateDoc(userRef, {
-          email: targetEmail,
-          role: userData.role,
-          dailyLimit: limitVal,
-          dailyUsed: Number(userData.dailyUsed || 0),
-          lastUsedDate: userData.lastUsedDate || new Date().toISOString().split('T')[0],
-          vipExpiresAt: userData.vipExpiresAt || ""
-        });
-        alert("អាប់ដេតព័ត៌មាន User បានដោយជោគជ័យ!");
-      } else {
-        const existingUser = usersList.find(u => u.email && u.email.toLowerCase().trim() === targetEmail);
-        const docId = existingUser ? existingUser.id : targetEmail;
-
-        await setDoc(doc(db, "Users", docId), {
-          email: targetEmail,
-          role: userData.role,
-          dailyLimit: limitVal,
-          dailyUsed: Number(userData.dailyUsed || 0),
-          lastUsedDate: new Date().toISOString().split('T')[0],
-          vipExpiresAt: userData.vipExpiresAt || ""
-        }, { merge: true });
-
-        alert("បន្ថែម User ថ្មីបានដោយជោគជ័យ!");
+      const record = {
+        email: targetEmail,
+        role: userData.role,
+        dailyLimit: limitVal,
+        customCharacterLimit: userData.customCharacterLimit === true,
+        dailyUsed: Number(userData.dailyUsed || 0),
+        charactersUsed: Number(userData.dailyUsed || 0),
+        totalCharacterLimit: Number.isFinite(limitVal) ? limitVal : 0,
+        lastUsedDate: userData.lastUsedDate || new Date().toISOString().split('T')[0],
+        vipExpiresAt: userData.vipExpiresAt || ""
+      };
+      // Save the legacy email document and every actual matching UID document.
+      // usersList is intentionally deduplicated for display, so it must not be
+      // used as the source of truth for updating all matching Firestore docs.
+      await setDoc(doc(db, "Users", targetEmail), record, { merge: true });
+      const allUsersSnapshot = await getDocs(collection(db, "Users"));
+      const matchingDocs = allUsersSnapshot.docs.filter((snap) => {
+        const data = snap.data();
+        return snap.id !== targetEmail && String(data.email || "").toLowerCase().trim() === targetEmail;
+      });
+      for (const matching of matchingDocs) {
+        const existing = matching.data();
+        await setDoc(doc(db, "Users", matching.id), { ...record, uid: existing.uid || matching.id }, { merge: true });
       }
+      alert(userData.id ? "អាប់ដេតព័ត៌មាន User បានដោយជោគជ័យ!" : "បន្ថែម User ថ្មីបានដោយជោគជ័យ!");
     } catch (err) {
       console.error("Error saving user:", err);
       alert("មានបញ្ហាក្នុងការរក្សាទុក User: " + err.message);
+    }
+  };
+
+  const handleApprovePayment = async (payment) => {
+    try {
+      const targetEmail = String(payment.email || "").toLowerCase().trim();
+      if (!targetEmail) throw new Error("Payment record has no email.");
+      const planKey = String(payment.plan || "").toLowerCase().replace(/[_-]/g, " ").trim();
+      const packageText = String(payment.packageName || "").toLowerCase().replace(/[_-]/g, " ").trim();
+      // The structured payment.plan field is authoritative. In particular, do not
+      // classify a Plus/Pro payment as VIP just because its package label contains "VIP".
+      let isUnlimited;
+      if (["plus", "pro", "vip pro"].includes(planKey)) {
+        isUnlimited = false;
+      } else if (["unlimited", "vip", "vip unlimited", "unlimited vip", "premium"].includes(planKey)) {
+        isUnlimited = true;
+      } else {
+        isUnlimited = /(^|\b)(vip unlimited|unlimited|premium|vip)(\b|$)/i.test(packageText)
+          && !/\b(vip pro|plus|pro)\b/i.test(packageText);
+      }
+      const role = isUnlimited ? "vip" : "plus";
+      // Fixed defaults are deliberate; Admin can set an individual custom limit in User Management.
+      const perMonthLimit = isUnlimited ? 50000 : 10000;
+      const billingCycle = String(payment.billingCycle || "monthly").toLowerCase();
+      const subscriptionMonths = billingCycle === "yearly" ? 12 : Math.max(1, Number(paymentSettings.pay_month) || 1);
+      const dailyLimit = Number(payment.totalCharacterLimit || payment.characterLimit) > 0
+        ? Number(payment.totalCharacterLimit || payment.characterLimit)
+        : perMonthLimit * (billingCycle === "yearly" ? 12 : 1);
+      const allUsersSnapshot = await getDocs(collection(db, "Users"));
+      const matchingUserDocs = allUsersSnapshot.docs.filter((snap) =>
+        String(snap.data().email || "").toLowerCase().trim() === targetEmail || snap.id.toLowerCase() === targetEmail
+      );
+      const existingSnap = matchingUserDocs.find((snap) => snap.id !== targetEmail) || matchingUserDocs[0];
+      const existingData = existingSnap ? existingSnap.data() : {};
+      const expiry = new Date();
+      expiry.setMonth(expiry.getMonth() + subscriptionMonths);
+      const activationData = {
+        email: targetEmail,
+        role,
+        dailyLimit,
+        totalCharacterLimit: dailyLimit,
+        customCharacterLimit: false,
+        dailyUsed: Number(existingData.charactersUsed ?? existingData.dailyUsed ?? 0),
+        charactersUsed: Number(existingData.charactersUsed ?? existingData.dailyUsed ?? 0),
+        lastUsedDate: existingData.lastUsedDate || new Date().toISOString().split("T")[0],
+        vipExpiresAt: expiry.toISOString().split("T")[0],
+      };
+      // Update the canonical email record, the payment UID, and every real
+      // UID-keyed document matching this email. This avoids stale role/limit
+      // data being left behind by the deduplicated Admin table.
+      await setDoc(doc(db, "Users", targetEmail), { ...activationData, paymentStatus: "approved" }, { merge: true });
+      const uidCandidates = new Set([String(payment.uid || payment.userId || "").trim()]);
+      matchingUserDocs.forEach((snap) => {
+        if (snap.id !== targetEmail) uidCandidates.add(String(snap.id));
+        const storedUid = String(snap.data().uid || "").trim();
+        if (storedUid && storedUid !== targetEmail) uidCandidates.add(storedUid);
+      });
+      for (const uid of uidCandidates) {
+        if (uid) await setDoc(doc(db, "Users", uid), { ...activationData, uid, paymentStatus: "approved" }, { merge: true });
+      }
+      await updateDoc(doc(db, "payments", payment.id), { status: "approved", approvedAt: serverTimestamp(), updatedAt: serverTimestamp() });
+      try { const emailResponse = await fetch(`${BACKEND_URL}/api/payment-approved-email`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ email: targetEmail, packageName: payment.packageName || (isUnlimited ? "VIP" : "Plus"), amount: payment.amount || 0 }) }); if (!emailResponse.ok) console.warn("Approval email service returned", emailResponse.status); }
+      catch (emailErr) { console.warn("Approval email could not be sent:", emailErr); }
+      alert(`Approved ${targetEmail} as ${isUnlimited ? "VIP" : "Plus"}. Check backend SMTP configuration if email was not delivered.`);
+    } catch (err) {
+      console.error("Payment approval failed:", err);
+      alert("Could not approve payment: " + (err.message || "Unknown error"));
     }
   };
 
@@ -430,8 +758,8 @@ function App() {
 
   const openGmail = () => {
     const recipient = paymentSettings.gmail || "seyhaemdev@gmail.com";
-    const subject = encodeURIComponent("Upgrade VIP Request - Khmer TTS");
-    const body = encodeURIComponent(`Hello Admin,\n\nI have transferred the payment for upgrading my VIP account.\n\nUser Email: ${user?.email || ""}`);
+    const subject = encodeURIComponent(`VIP Payment - ${selectedPlanName} (${billingCycle}) - $${selectedPlanPrice.toFixed(2)}`);
+    const body = encodeURIComponent(`Hello Admin,\n\nI would like to request/confirm ${selectedPlanName}.\nBilling cycle: ${billingCycle}.\nAmount: $${selectedPlanPrice.toFixed(2)}.\nUser Email: ${user?.email || ""}\n\nI will attach my payment receipt for verification.`);
     window.open(`https://mail.google.com/mail/?view=cm&fs=1&to=${recipient}&su=${subject}&body=${body}`, "_blank");
   };
 
@@ -439,17 +767,41 @@ function App() {
     ? 0 
     : Math.min(100, (userUsage.dailyUsed / userUsage.limit) * 100);
 
-  const qrImageSrc = formatGoogleDriveUrl(paymentSettings.qrCodeUrl);
-
-  const discountMultiplier = 1 - ((paymentSettings.yearlyDiscountPercent || 5) / 100);
-  const vipProYearlyPrice = (paymentSettings.vipProPrice * 12 * discountMultiplier).toFixed(2);
-  const vipUnlimitedYearlyPrice = (paymentSettings.vipUnlimitedPrice * 12 * discountMultiplier).toFixed(2);
+  const qrImageFallbacks = getGoogleDriveImageFallbacks(paymentSettings.qrCodeUrl);
+  const qrImageSrc = qrImageFallbacks[qrFallbackIndex] || formatGoogleDriveUrl(paymentSettings.qrCodeUrl);
+  useEffect(() => { setQrImageFailed(false); setQrFallbackIndex(0); }, [paymentSettings.qrCodeUrl]);
+  const discountPercent = Math.max(0, Math.min(100, Number(paymentSettings.yearlyDiscountPercent ?? 10)));
+  const discountMultiplier = 1 - (discountPercent / 100);
+  const vipProYearlyPrice = (Number(paymentSettings.vipProPrice || 0) * 12 * discountMultiplier).toFixed(2);
+  const vipUnlimitedYearlyPrice = (Number(paymentSettings.vipUnlimitedPrice || 0) * 12 * discountMultiplier).toFixed(2);
+  const selectedPlanName = selectedVipPlan === "unlimited" ? "VIP" : "Plus";
+  const selectedMonthlyPrice = Number(selectedVipPlan === "unlimited" ? paymentSettings.vipUnlimitedPrice : paymentSettings.vipProPrice) || 0;
+  const selectedYearlyPrice = Number(selectedVipPlan === "unlimited" ? vipUnlimitedYearlyPrice : vipProYearlyPrice) || 0;
+  const selectedPlanPrice = billingCycle === "yearly" ? selectedYearlyPrice : selectedMonthlyPrice;
+  const selectedPlanLimit = Number(selectedVipPlan === "unlimited" ? paymentSettings.vipUnlimitedLimit : paymentSettings.vipProLimit) || 0;
+  const selectedPlanDuration = billingCycle === "yearly" ? 12 : Math.max(1, Number(paymentSettings.pay_month) || 1);
 
   const userIsAdmin = user && (isAdmin || userUsage.role === "admin" || user.email?.toLowerCase().trim() === "seyhaemdev@gmail.com");
 
+  useEffect(() => { if (user) setShowUpgradeModal(false); }, [user]);
+
   return (
     <div className="container">
-      
+      {/* {dbLoading && (
+        <div style={{ position: "fixed", top: 0, left: 0, right: 0, zIndex: 9999, background: "#ffffff", padding: "12px 20px", boxShadow: "0 2px 10px rgba(0,0,0,0.1)", display: "flex", alignItems: "center", gap: "12px" }}>
+          <Database className="spin" size={20} color="#2563eb" />
+          <div style={{ flex: 1 }}>
+            <div style={{ display: "flex", justifyContent: "space-between", fontSize: "12px", fontWeight: "bold", color: "#1e293b", marginBottom: "4px" }}>
+              <span>កំពុងទាញយកទិន្នន័យពី Firebase Firestore...</span>
+              <span>{dbProgress}%</span>
+            </div>
+            <div style={{ background: "#e2e8f0", height: "6px", borderRadius: "10px", overflow: "hidden" }}>
+              <div style={{ width: `${dbProgress}%`, background: "#2563eb", height: "100%", transition: "width 0.2s" }} />
+            </div>
+          </div>
+        </div>
+      )} */}
+
       <Navbar 
         user={user}
         isAdmin={userIsAdmin}
@@ -508,14 +860,17 @@ function App() {
           </div>
         )}
 
-        {!user ? (
-          <div className="login-prompt">
-            <h2>{t.signInPrompt || "សូមចូលប្រើប្រាស់កម្មវិធី"}</h2>
-            <p>{t.signInDesc || "ចូលប្រព័ន្ធជាមួយ Google ដើម្បីប្រើប្រាស់សេវាកម្ម TTS"}</p>
-            <button onClick={handleLogin} disabled={isLoggingIn} className="btn-login-large">
-              <LogIn size={20} /> {isLoggingIn ? "កំពុងចូល..." : t.login || "Sign in with Google"}
-            </button>
-          </div>
+        {!authReady ? (
+          <div style={{ minHeight: "40vh", display: "grid", placeItems: "center", color: "#64748b" }}>Loading...</div>
+        ) : !user ? (
+          <PlansLanding
+            appLang={appLang}
+            settings={paymentSettings}
+            onFreeClick={() => requestLogin("free")}
+            onVipClick={(plan) => requestLogin(plan)}
+            isLoggingIn={isLoggingIn}
+            t={t}
+          />
         ) : currentTab === "user" ? (
           <TTSSection 
             t={t}
@@ -542,16 +897,48 @@ function App() {
           />
         ) : (
           <AdminPanel 
+            appLang={appLang}
             paymentSettings={paymentSettings}
             setPaymentSettings={setPaymentSettings}
             handleSavePaymentSettings={handleSavePaymentSettings}
             paymentsList={paymentsList}
+            handleApprovePayment={handleApprovePayment}
+            handleSetPaymentStatus={handleSetPaymentStatus}
+            handleEditPayment={handleEditPayment}
+            handleDeletePayment={handleDeletePayment}
             usersList={usersList}
             handleSaveUser={handleSaveUser}
             handleDeleteUser={handleDeleteUser}
           />
         )}
       </main>
+
+      {showPaymentSuccess && (
+        <div className="modal-overlay" style={{ position: "fixed", inset: 0, zIndex: 9999, display: "flex", alignItems: "center", justifyContent: "center", background: "rgba(15,23,42,.62)", padding: 20 }} role="dialog" aria-modal="true">
+          <div className="modal-content" style={{ width: "min(440px, 100%)", textAlign: "center", borderRadius: 18, padding: 30, background: "#fff", boxShadow: "0 24px 70px rgba(0,0,0,.25)" }}>
+            <div style={{ width: 64, height: 64, borderRadius: "50%", margin: "0 auto 16px", display: "grid", placeItems: "center", background: "#dcfce7", color: "#15803d", fontSize: 34 }}>✓</div>
+            <h2 style={{ margin: "0 0 12px", color: "#166534" }}>{appLang === "km" ? "បានដាក់ស្នើដោយជោគជ័យ" : "Submit Successfully"}</h2>
+            <p style={{ color: "#334155", lineHeight: 1.7, marginBottom: 22 }}>{appLang === "km" ? "សំណើបង់ប្រាក់របស់អ្នកត្រូវបានរក្សាទុក។ សូមរង់ចាំ Admin អនុម័ត។" : "Your payment request has been submitted. Please wait for approval from admin."}</p>
+            <button type="button" onClick={() => setShowPaymentSuccess(false)} style={{ border: 0, borderRadius: 10, padding: "11px 26px", color: "#fff", background: "#15803d", fontWeight: 700, cursor: "pointer" }}>{appLang === "km" ? "យល់ព្រម" : "OK"}</button>
+          </div>
+        </div>
+      )}
+
+      {showLoginModal && (
+        <div className="modal-overlay" role="dialog" aria-modal="true" aria-label="Google sign in">
+          <div className="modal-content login-modal-card">
+            <button className="modal-close" onClick={() => setShowLoginModal(false)} aria-label="Close"><X size={20} /></button>
+            <div className="login-modal-icon"><User size={27} /></div>
+            <h2>{appLang === "km" ? "ចូលដោយគណនី Google" : "Continue with Google"}</h2>
+            <p>{appLang === "km" ? "សូមជ្រើសរើស Gmail ដែលអ្នកចង់ប្រើសម្រាប់ Text-Speech។ សម្រាប់ VIP សូមប្រើ Gmail ដូចគ្នានឹងការបង់ប្រាក់។" : "Choose the Gmail account you want to use. VIP approval must match this email address."}</p>
+            <div className="login-account-hint">{loginPlan === "free" ? (appLang === "km" ? "គម្រោងឥតគិតថ្លៃ" : "Free plan") : (loginPlan === "unlimited" ? "VIP" : "Plus")}</div>
+            <button className="google-login-button" onClick={continueLogin} disabled={isLoggingIn}>
+              <span className="google-g-mark">G</span>{isLoggingIn ? (appLang === "km" ? "កំពុងចូល..." : "Signing in...") : (appLang === "km" ? "បន្តជាមួយ Google" : "Continue with Google")}
+            </button>
+            <button className="login-cancel-button" onClick={() => setShowLoginModal(false)}>{appLang === "km" ? "បោះបង់" : "Cancel"}</button>
+          </div>
+        </div>
+      )}
 
       {showUpgradeModal && (
         <div className="modal-overlay">
@@ -561,85 +948,63 @@ function App() {
             </button>
 
             <div style={{ textAlign: "center", marginBottom: "18px" }}>
-              <h2 style={{ margin: 0, color: "#0f172a", fontSize: "1.4rem" }}>👑 ដំឡើងគណនី VIP (Upgrade VIP)</h2>
-              <p style={{ margin: "6px 0 0 0", color: "#64748b", fontSize: "13px" }}>
-                កញ្ចប់សេវាកម្ម {paymentSettings.pay_month} ខែ - ស្កែន QR Code ដើម្បីទូទាត់
-              </p>
+              <div style={{ margin: "0 auto 10px", width: 54, height: 54, display: "grid", placeItems: "center", borderRadius: 16, color: "#fff", background: "linear-gradient(135deg,#4f46e5,#7c3aed)" }}><Crown size={26} /></div>
+              <h2 style={{ margin: 0, color: "#0f172a", fontSize: "1.45rem" }}>{appLang === "km" ? `បង់ប្រាក់សម្រាប់ ${selectedPlanName}` : `Payment for ${selectedPlanName}`}</h2>
+              <p style={{ margin: "6px 0 0 0", color: "#64748b", fontSize: "13px" }}>{appLang === "km" ? "ជ្រើសរើសរយៈពេល ហើយស្កែន QR Code ដើម្បីបង់ប្រាក់" : "Choose a billing period, then scan the QR code to pay."}</p>
             </div>
 
-            <div style={{ display: "flex", gap: "8px", marginBottom: "18px", justifyContent: "center", background: "#f1f5f9", padding: "4px", borderRadius: "10px" }}>
-              <button 
-                onClick={() => setBillingCycle("monthly")}
-                style={{ flex: 1, padding: "8px 14px", background: billingCycle === "monthly" ? "#2563eb" : "transparent", color: billingCycle === "monthly" ? "#fff" : "#475569", border: "none", borderRadius: "8px", cursor: "pointer", fontWeight: "bold", fontSize: "13px" }}
-              >
-                Monthly Plan
+            <div style={{ display: "flex", gap: "8px", marginBottom: "18px", background: "#f1f5f9", padding: "5px", borderRadius: "12px" }}>
+              <button onClick={() => setBillingCycle("monthly")} style={{ flex: 1, padding: "11px 10px", background: billingCycle === "monthly" ? "#4f46e5" : "transparent", color: billingCycle === "monthly" ? "#fff" : "#475569", border: "none", borderRadius: "9px", cursor: "pointer", fontWeight: 700 }}>
+                {appLang === "km" ? "ប្រចាំខែ" : "Monthly"}
               </button>
-              <button 
-                onClick={() => setBillingCycle("yearly")}
-                style={{ flex: 1, padding: "8px 14px", background: billingCycle === "yearly" ? "#10b981" : "transparent", color: billingCycle === "yearly" ? "#fff" : "#475569", border: "none", borderRadius: "8px", cursor: "pointer", fontWeight: "bold", fontSize: "13px" }}
-              >
-                Yearly Plan <span style={{ background: "#fef08a", color: "#854d0e", fontSize: "10px", padding: "2px 6px", borderRadius: "10px", marginLeft: "4px" }}>{paymentSettings.yearlyDiscountPercent}% OFF</span>
+              <button onClick={() => setBillingCycle("yearly")} style={{ flex: 1, padding: "11px 10px", background: billingCycle === "yearly" ? "#059669" : "transparent", color: billingCycle === "yearly" ? "#fff" : "#475569", border: "none", borderRadius: "9px", cursor: "pointer", fontWeight: 700 }}>
+                {appLang === "km" ? "ប្រចាំឆ្នាំ" : "Yearly"} <span style={{ background: "#fef3c7", color: "#92400e", fontSize: "10px", padding: "2px 6px", borderRadius: "10px", marginLeft: "4px" }}>{discountPercent}% OFF</span>
               </button>
             </div>
 
-            <div className="pricing-grid" style={{ gap: "10px", marginBottom: "18px" }}>
-              <div className="pricing-card" style={{ padding: "12px", border: "1px solid #e2e8f0", borderRadius: "10px" }}>
-                <h4 style={{ margin: "0 0 4px 0", fontSize: "14px" }}>Free Tier</h4>
-                <div className="price" style={{ fontSize: "1.2rem", fontWeight: "bold", color: "#0f172a" }}>$0 <span style={{ fontSize: "11px", color: "#64748b" }}>/{billingCycle === "yearly" ? "ឆ្នាំ" : "ខែ"}</span></div>
-                <ul style={{ fontSize: "11px", paddingLeft: "16px", margin: "8px 0 0 0", color: "#475569" }}>
-                  <li><strong>{paymentSettings.freeLimit.toLocaleString()}</strong> តួអក្សរ/ថ្ងៃ</li>
-                </ul>
+            <div style={{ border: "1px solid #dbeafe", background: "linear-gradient(135deg,#eff6ff,#faf5ff)", borderRadius: "16px", padding: "18px", marginBottom: "18px" }}>
+              <div style={{ display: "flex", justifyContent: "space-between", gap: 12, alignItems: "start" }}>
+                <div>
+                  <div style={{ color: "#4f46e5", fontWeight: 800, fontSize: 12, letterSpacing: ".06em" }}>{appLang === "km" ? "គម្រោងដែលបានជ្រើស" : "SELECTED PLAN"}</div>
+                  <h3 style={{ margin: "5px 0", color: "#111827", fontSize: 20 }}>{selectedPlanName}</h3>
+                  <div style={{ color: "#64748b", fontSize: 12 }}>{(selectedPlanLimit * selectedPlanDuration).toLocaleString()} {appLang === "km" ? "តួអក្សរសរុបក្នុងរយៈពេលនេះ" : "total characters for this period"}</div>
+                </div>
+                <div style={{ textAlign: "right", whiteSpace: "nowrap" }}>
+                  <div style={{ color: "#111827", fontWeight: 800, fontSize: 28 }}>${selectedPlanPrice.toFixed(2)}</div>
+                  <div style={{ color: "#64748b", fontSize: 12 }}>{billingCycle === "yearly" ? (appLang === "km" ? "សម្រាប់ ១ ឆ្នាំ" : "per year") : (appLang === "km" ? "ក្នុងមួយខែ" : "per month")}</div>
+                  {billingCycle === "yearly" && discountPercent > 0 && <div style={{ color: "#047857", fontSize: 11 }}>{appLang === "km" ? `សន្សំ ${discountPercent}%` : `Save ${discountPercent}%`}</div>}
+                </div>
               </div>
 
-              <div className="pricing-card featured" style={{ padding: "12px", border: "2px solid #2563eb", borderRadius: "10px", background: "#f0f6ff", position: "relative" }}>
-                <span className="badge" style={{ position: "absolute", top: "-10px", right: "10px", background: "#2563eb", color: "#fff", fontSize: "9px", padding: "2px 8px", borderRadius: "10px", fontWeight: "bold" }}>POPULAR</span>
-                <h4 style={{ margin: "0 0 4px 0", fontSize: "14px", color: "#1e40af" }}>VIP Pro ({paymentSettings.pay_month} Months)</h4>
-                <div className="price" style={{ fontSize: "1.2rem", fontWeight: "bold", color: "#1e3a8a" }}>
-                  ${billingCycle === "yearly" ? vipProYearlyPrice : Number(paymentSettings.vipProPrice).toFixed(2)} 
-                  <span style={{ fontSize: "11px", color: "#64748b" }}>/{billingCycle === "yearly" ? "ឆ្នាំ" : "ខែ"}</span>
-                </div>
-                <ul style={{ fontSize: "11px", paddingLeft: "16px", margin: "8px 0 0 0", color: "#334155" }}>
-                  <li><strong>{paymentSettings.vipProLimit.toLocaleString()}</strong> តួអក្សរ/ថ្ងៃ</li>
-                  <li>សុពលភាព: {paymentSettings.pay_month} ខែ</li>
-                </ul>
-              </div>
-
-              <div className="pricing-card" style={{ padding: "12px", border: "1px solid #e2e8f0", borderRadius: "10px" }}>
-                <h4 style={{ margin: "0 0 4px 0", fontSize: "14px" }}>VIP Unlimited</h4>
-                <div className="price" style={{ fontSize: "1.2rem", fontWeight: "bold", color: "#0f172a" }}>
-                  ${billingCycle === "yearly" ? vipUnlimitedYearlyPrice : Number(paymentSettings.vipUnlimitedPrice).toFixed(2)} 
-                  <span style={{ fontSize: "11px", color: "#64748b" }}>/{billingCycle === "yearly" ? "ឆ្នាំ" : "ខែ"}</span>
-                </div>
-                <ul style={{ fontSize: "11px", paddingLeft: "16px", margin: "8px 0 0 0", color: "#475569" }}>
-                  <li><strong>{paymentSettings.vipUnlimitedLimit.toLocaleString()}</strong> តួអក្សរ/ថ្ងៃ</li>
-                  <li>សុពលភាព: {paymentSettings.pay_month} ខែ</li>
-                </ul>
-              </div>
             </div>
 
-            <div className="qr-section" style={{ textAlign: "center", background: "#f8fafc", padding: "16px", borderRadius: "12px", border: "1px solid #e2e8f0", marginBottom: "16px" }}>
-              <h4 style={{ margin: "0 0 10px 0", fontSize: "13px", color: "#1e293b" }}>
-                Scan QR Code ដើម្បីទូទាត់ ({paymentSettings.bankName || "ABA Bank"}) - {paymentSettings.pay_month} ខែ
-              </h4>
-              <div className="qr-box" style={{ display: "inline-block", background: "#ffffff", padding: "10px", borderRadius: "10px", boxShadow: "0 2px 8px rgba(0,0,0,0.06)" }}>
-                <img 
-                  src={qrImageSrc || "https://api.qrserver.com/v1/create-qr-code/?size=180x180&data=ABA_PAYMENT"} 
-                  alt="KHQR Code" 
-                  onError={(e) => {
-                    e.target.onerror = null;
-                    e.target.src = "https://api.qrserver.com/v1/create-qr-code/?size=180x180&data=ABA_PAYMENT";
-                  }}
-                  style={{ width: "160px", height: "160px", borderRadius: "8px", objectFit: "contain" }}
-                />
-                <div style={{ marginTop: "8px", fontSize: "13px", fontWeight: "bold", color: "#0f172a" }}>
-                  {paymentSettings.bankName}: {paymentSettings.accountNumber}
-                </div>
+            <div className="qr-section" style={{ textAlign: "center", background: "#f8fafc", padding: "16px", borderRadius: "14px", border: "1px solid #e2e8f0", marginBottom: "16px" }}>
+              <h4 style={{ margin: "0 0 12px", fontSize: "14px", color: "#1e293b" }}>{appLang === "km" ? "ស្កែន QR Code ដើម្បីទូទាត់" : "Scan QR code to pay"} · {paymentSettings.bankName || ""}</h4>
+              <div className="qr-box" style={{ display: "inline-block", background: "#ffffff", padding: "10px", borderRadius: "12px", boxShadow: "0 2px 12px rgba(15,23,42,.08)" }}>
+                {qrImageSrc && !qrImageFailed ? (
+                  <img key={qrImageSrc} src={qrImageSrc} alt="Payment QR code" referrerPolicy="no-referrer" onError={() => { if (qrFallbackIndex + 1 < qrImageFallbacks.length) setQrFallbackIndex((index) => index + 1); else setQrImageFailed(true); }} style={{ width: "220px", height: "220px", borderRadius: "8px", objectFit: "contain" }} />
+                ) : (
+                  <div style={{ width: 220, minHeight: 150, display: "grid", placeItems: "center", padding: 14, boxSizing: "border-box", color: "#92400e", fontSize: 12, background: "#fffbeb", borderRadius: 8 }}>
+                    <div><Database size={24} style={{ marginBottom: 8 }} /><div>{appLang === "km" ? "QR Code មិនអាចបង្ហាញបានទេ។ សូមពិនិត្យថា URL នេះជារូបភាព QR ពិតប្រាកដ ហើយ Google Drive អនុញ្ញាតឱ្យមើលដោយសាធារណៈ។" : "QR code could not load. Confirm settings.qrCodeUrl points to the actual QR image and is publicly viewable."}</div></div>
+                  </div>
+                )}
+                <div style={{ marginTop: "10px", fontSize: "13px", fontWeight: "bold", color: "#0f172a" }}>{paymentSettings.bankName}: {paymentSettings.accountNumber}</div>
               </div>
+              <div style={{ marginTop: 12, fontSize: 13, color: "#334155" }}><strong>{appLang === "km" ? "ចំនួនត្រូវបង់៖" : "Amount due:"} ${selectedPlanPrice.toFixed(2)}</strong></div>
+              <div style={{ marginTop: 4, fontSize: 11, color: "#64748b" }}>{appLang === "km" ? "បន្ទាប់ពីបង់ប្រាក់ សូមផ្ញើ Receipt តាម Telegram ឬ Gmail ដើម្បីឱ្យ Admin ផ្ទៀងផ្ទាត់។" : "After paying, send your receipt by Telegram or Gmail for admin verification."}</div>
             </div>
 
+            <div style={{ margin: "14px 0", padding: 14, border: "1px dashed #94a3b8", borderRadius: 10, background: "#f8fafc" }}>
+              <label htmlFor="payment-receipt-upload" style={{ display: "block", fontWeight: 700, marginBottom: 8 }}>
+                {appLang === "km" ? "បង្ហោះបង្កាន់ដៃបង់ប្រាក់ (រូបភាព ឬ PDF)" : "Upload payment receipt (image or PDF)"}
+              </label>
+              <input id="payment-receipt-upload" type="file" accept="image/*,application/pdf" onChange={(e) => setPaymentReceiptFile(e.target.files?.[0] || null)} style={{ width: "100%" }} />
+              {paymentReceiptFile && <p style={{ marginTop: 6, fontSize: 12, color: "#166534" }}>{paymentReceiptFile.name}</p>}
+              <p style={{ marginTop: 5, fontSize: 11, color: "#64748b" }}>{appLang === "km" ? "សូម Scan QR បង់ប្រាក់ រួច Upload រូបបង្កាន់ដៃមកទីនេះ។" : "Scan the QR code, complete payment, then upload the receipt here."}</p>
+            </div>
             <div className="contact-buttons" style={{ textAlign: "center" }}>
               <p style={{ margin: "0 0 10px 0", fontSize: "12px", color: "#475569", fontWeight: "bold" }}>
-                បន្ទាប់ពីទូទាត់រួច សូមផ្ញើវិក្កយបត្រ (Receipt) មកកាន់ Admin ({paymentSettings.gmail})៖
+                {appLang === "km" ? `ផ្ញើ Receipt សម្រាប់ ${selectedPlanName} (${billingCycle === "yearly" ? "ប្រចាំឆ្នាំ" : "ប្រចាំខែ"}) — $${selectedPlanPrice.toFixed(2)} ទៅកាន់Admin` : `Send receipt for ${selectedPlanName} (${billingCycle}) — $${selectedPlanPrice.toFixed(2)} to Admin`}
               </p>
               <div style={{ display: "flex", gap: "10px", justifyContent: "center" }}>
                 <a 
@@ -654,9 +1019,18 @@ function App() {
                   onClick={openGmail}
                   style={{ flex: 1, display: "inline-flex", alignItems: "center", justifyContent: "center", gap: "6px", background: "#ea4335", color: "#fff", border: "none", padding: "10px", borderRadius: "8px", cursor: "pointer", fontWeight: "bold", fontSize: "13px" }}
                 >
-                  <Mail size={16} /> Send via Gmail
+                  <Mail size={16} /> {appLang === "km" ? "ផ្ញើតាម Gmail" : "Send via Gmail"}
                 </button>
               </div>
+              <button
+                type="button"
+                onClick={handleSubmitPayment}
+                disabled={paymentSubmitting}
+                style={{ width: "100%", marginTop: 14, display: "flex", alignItems: "center", justifyContent: "center", gap: 8, background: paymentSubmitting ? "#94a3b8" : "linear-gradient(135deg,#059669,#047857)", color: "#fff", border: 0, padding: "13px 16px", borderRadius: 10, fontWeight: 800, cursor: paymentSubmitting ? "wait" : "pointer" }}
+              >
+                {paymentSubmitting ? (appLang === "km" ? "កំពុងផ្ញើ..." : "Submitting...") : (appLang === "km" ? "ខ្ញុំបានបង់ប្រាក់ — ផ្ញើសំណើទៅ Admin" : "I have paid — submit payment request")}
+              </button>
+              <p style={{ margin: "8px 0 0", fontSize: 11, color: "#64748b" }}>{appLang === "km" ? "សំណើនឹងរក្សាទុកក្នុងប្រព័ន្ធ ជាស្ថានភាព Pending រង់ចាំ Admin អនុម័ត។ ការចុចប៊ូតុងនេះមិនបញ្ជាក់ថាបានបង់ប្រាក់រួចទេ។" : "This creates a pending Firebase payment record. It does not itself verify that payment was received."}</p>
             </div>
 
           </div>

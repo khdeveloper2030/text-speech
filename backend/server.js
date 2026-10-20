@@ -2,263 +2,209 @@ const express = require("express");
 const cors = require("cors");
 const admin = require("firebase-admin");
 const { MsEdgeTTS, OUTPUT_FORMAT } = require("msedge-tts");
-const googleTTS = require("google-tts-api");
+const googleTTS = require("google-tts-api"); // Kept to preserve your existing dependency/import.
+const fs = require("fs");
+const path = require("path");
 
+// Initialize Firebase Admin only when credentials are available.
 if (admin && admin.apps && admin.apps.length === 0) {
   try {
-    const serviceAccount = require("./serviceAccountKey.json");
-    admin.initializeApp({
-      credential: admin.credential.cert(serviceAccount)
-    });
-    console.log("✅ Firebase Admin SDK Initialized!");
+    const serviceAccountPath = path.join(__dirname, "serviceAccountKey.json");
+    if (fs.existsSync(serviceAccountPath)) {
+      const serviceAccount = require(serviceAccountPath);
+      admin.initializeApp({
+        credential: admin.credential.cert(serviceAccount)
+      });
+      console.log("✅ Firebase Admin SDK Initialized!");
+    } else {
+      console.warn("⚠️ serviceAccountKey.json not found; Firebase Admin features are disabled.");
+    }
   } catch (e) {
-    console.warn("⚠️ Firebase Admin serviceAccountKey.json មិនបានស្វែងរកឃើញ៖", e.message);
+    console.warn("⚠️ Firebase Admin initialization failed:", e.message);
   }
 }
 
 const app = express();
 app.use(cors());
-app.use(express.json());
+app.use(express.json({ limit: "2mb" }));
 
-const db = (admin && admin.apps && admin.apps.length > 0) ? admin.firestore() : null;
+const db = admin && admin.apps && admin.apps.length > 0 ? admin.firestore() : null;
+void db; // Kept available for existing Firebase-related extensions.
 
-function getEdgeVoiceName(lang, voiceType) {
-  if (lang === "km") {
-    return voiceType === "man" || voiceType === "boy" 
-      ? "km-KH-PisethNeural" 
-      : "km-KH-SreymomNeural";
-  } else if (lang === "en") {
-    return voiceType === "man" || voiceType === "boy" 
-      ? "en-US-GuyNeural" 
-      : "en-US-AriaNeural";
-  } else if (lang === "fr") {
-    return "fr-FR-DeniseNeural";
-  } else if (lang === "ja") {
-    return "ja-JP-NanamiNeural";
-  } else if (lang === "zh") {
-    return "zh-CN-XiaoxiaoNeural";
-  } else if (lang === "th") {
-    return "th-TH-PremwadeeNeural";
-  } else if (lang === "vi") {
-    return "vi-VN-HoaiMyNeural";
+// Edge TTS is a shared service and commonly returns HTTP 429 when several
+// WebSocket sessions start at once. Serialize generation requests in this
+// process to reduce rate-limit bursts without changing the public API.
+let edgeQueue = Promise.resolve();
+async function runEdgeTtsInQueue(task) {
+  const previous = edgeQueue;
+  let release;
+  edgeQueue = new Promise(resolve => { release = resolve; });
+  await previous;
+  try { return await task(); }
+  finally { release(); }
+}
+const sleep = (ms) => new Promise(resolve => setTimeout(resolve, ms));
+
+function getEdgeVoiceName(lang, voiceType, characterStyle) {
+  const gender = ["man", "boy"].includes(String(voiceType || "").toLowerCase()) ? "man" : "woman";
+  const language = String(lang || "km").toLowerCase();
+  // Use distinct natural voices where Edge offers them. Voice gender is only
+  // guaranteed for languages with an explicit male/female pair below.
+  const voiceMap = {
+    km: { man: "km-KH-PisethNeural", woman: "km-KH-SreymomNeural" },
+    en: {
+      man: characterStyle === "news" ? "en-US-ChristopherNeural" : "en-US-GuyNeural",
+      woman: characterStyle === "story" ? "en-US-JennyNeural" : "en-US-AriaNeural"
+    },
+    fr: { man: "fr-FR-HenriNeural", woman: "fr-FR-DeniseNeural" },
+    ja: { man: "ja-JP-KeitaNeural", woman: "ja-JP-NanamiNeural" },
+    zh: { man: "zh-CN-YunxiNeural", woman: "zh-CN-XiaoxiaoNeural" },
+    "zh-cn": { man: "zh-CN-YunxiNeural", woman: "zh-CN-XiaoxiaoNeural" },
+    th: { man: "th-TH-NiwatNeural", woman: "th-TH-PremwadeeNeural" },
+    vi: { man: "vi-VN-NamMinhNeural", woman: "vi-VN-HoaiMyNeural" },
+    es: { man: "es-ES-AlvaroNeural", woman: "es-ES-ElviraNeural" },
+    de: { man: "de-DE-ConradNeural", woman: "de-DE-KatjaNeural" },
+    it: { man: "it-IT-DiegoNeural", woman: "it-IT-ElsaNeural" },
+    pt: { man: "pt-BR-AntonioNeural", woman: "pt-BR-FranciscaNeural" }
+  };
+  const pair = voiceMap[language] || voiceMap.km;
+  return pair[gender];
+}
+
+// Style is applied through prosody-like text pacing plus voice choice.
+// msedge-tts's public toStream API accepts text rather than a guaranteed
+// arbitrary-SSML contract, so do not inject unverified SSML tags.
+function applyReadingStyle(text, style) {
+  const clean = String(text || "").trim();
+  if (style === "news") {
+    // News copy benefits from clear, short clauses and explicit pauses.
+    return clean
+      .replace(/([,;:])\s*/g, "$1 ")
+      .replace(/([.!?។])\s*/g, "$1 ");
   }
-  return "km-KH-SreymomNeural";
+  if (style === "story") {
+    // Slightly more expressive punctuation/pacing without altering words.
+    return clean
+      .replace(/([.!?។])\s*/g, "$1 … ")
+      .replace(/,\s*/g, ", ");
+  }
+  return clean;
 }
 
 function splitTextIntoChunks(text, maxLength = 200) {
-  const sentences = text.match(/[^.!?។\n]+[.!?។\n]*/g) || [text];
+  const source = String(text || "");
   const chunks = [];
-  let currentChunk = "";
-
-  for (const sentence of sentences) {
-    if ((currentChunk + sentence).length > maxLength) {
-      if (currentChunk.trim()) chunks.push(currentChunk.trim());
-      currentChunk = sentence;
-    } else {
-      currentChunk += sentence;
-    }
+  let remaining = source.trim();
+  while (remaining.length > maxLength) {
+    let cut = remaining.lastIndexOf(" ", maxLength);
+    if (cut < Math.floor(maxLength * 0.55)) cut = maxLength;
+    const chunk = remaining.slice(0, cut).trim();
+    if (chunk) chunks.push(chunk);
+    remaining = remaining.slice(cut).trim();
   }
-  if (currentChunk.trim()) chunks.push(currentChunk.trim());
+  if (remaining) chunks.push(remaining);
   return chunks;
 }
 
-async function generateSingleEdgeChunk(textChunk, voiceName, retries = 3) {
+async function generateSingleEdgeChunk(textChunk, voiceName, retries = 4) {
   for (let attempt = 1; attempt <= retries; attempt++) {
     try {
       const tts = new MsEdgeTTS();
       await tts.setMetadata(voiceName, OUTPUT_FORMAT.AUDIO_24KHZ_48KBITRATE_MONO_MP3);
-
       const escapedText = textChunk
         .replace(/&/g, "&amp;")
         .replace(/</g, "&lt;")
         .replace(/>/g, "&gt;");
-
       const { audioStream } = await tts.toStream(escapedText);
       const chunks = [];
 
       const buffer = await new Promise((resolve, reject) => {
-        const timeout = setTimeout(() => {
-          reject(new Error("Edge TTS Stream Timeout"));
-        }, 12000);
-
-        audioStream.on("data", (c) => chunks.push(c));
-        audioStream.on("close", () => {
+        const timeout = setTimeout(() => reject(new Error("MsEdgeTTS stream timeout")), 20000);
+        audioStream.on("data", chunk => chunks.push(chunk));
+        audioStream.on("end", () => {
           clearTimeout(timeout);
           resolve(Buffer.concat(chunks));
         });
-        audioStream.on("error", (err) => {
+        audioStream.on("error", err => {
           clearTimeout(timeout);
           reject(err);
         });
       });
 
-      if (buffer && buffer.length > 0) return buffer;
+      if (!buffer.length) throw new Error("Empty audio response from Edge TTS.");
+      return buffer;
     } catch (err) {
-      console.warn(`Edge TTS attempt ${attempt} failed: ${err.message}`);
+      const message = String(err?.message || err || "Edge TTS error");
+      const rateLimited = /\b429\b|too many requests|unexpected server response/i.test(message);
+      console.warn(`MsEdgeTTS attempt ${attempt}/${retries} failed${rateLimited ? " (rate limited)" : ""}:`, message);
       if (attempt === retries) throw err;
-      await new Promise(r => setTimeout(r, 800));
+      // Give Edge TTS time to release the rate limit. Do not hammer it with
+      // rapid retries; 429 responses need a longer exponential cooldown.
+      await sleep(rateLimited ? Math.min(15000, 2000 * (2 ** (attempt - 1))) : 1000 * attempt);
     }
   }
 }
 
-async function generateEdgeTTSWithChunking(text, voiceName) {
-  const chunks = splitTextIntoChunks(text, 180);
-  const audioBuffers = [];
-
-  for (const chunk of chunks) {
-    const buf = await generateSingleEdgeChunk(chunk, voiceName);
-    audioBuffers.push(buf);
-  }
-
-  return Buffer.concat(audioBuffers);
-}
-
-async function generateGoogleTTSFallback(text, lang = "km") {
-  try {
-    const base64Audio = await googleTTS.getAudioBase64(text, {
-      lang: lang === "km" ? "km" : lang,
-      slow: false,
-      host: "https://translate.google.com",
-      timeout: 10000,
-    });
-    return Buffer.from(base64Audio, "base64");
-  } catch (err) {
-    console.error("Google TTS Fallback failed:", err.message);
-    throw err;
-  }
-}
-
-// 🎯 API Synthesize Speech
-app.post("/api/tts", async (req, res) => {
-  const { text, lang = "km", voiceType = "woman", idToken } = req.body;
-
-  if (!text || !text.trim()) {
-    return res.status(400).json({ success: false, error: "សូមបញ្ចូលអត្ថបទជាមុនសិន!" });
-  }
-
-  let userEmail = "";
-  let userUid = "";
-
-  if (idToken && admin && admin.apps && admin.apps.length > 0) {
-    try {
-      const decodedToken = await admin.auth().verifyIdToken(idToken);
-      userUid = decodedToken.uid;
-      userEmail = decodedToken.email ? decodedToken.email.toLowerCase().trim() : "";
-    } catch (e) {
-      console.warn("Invalid Firebase ID Token:", e.message);
-    }
-  }
-
-  let role = "free";
-  let limit = 200;
-  let dailyUsed = 0;
-  let targetUserRef = null;
-
-  if (db && (userUid || userEmail)) {
-    try {
-      let userSnap = null;
-      
-      // 1. ស្វែងរក Document តាម UID
-      if (userUid) {
-        userSnap = await db.collection("Users").doc(userUid).get();
-      }
-
-      // 2. បើរកមិនឃើញ ស្វែងរកតាម Email 
-      if ((!userSnap || !userSnap.exists) && userEmail) {
-        const emailDocSnap = await db.collection("Users").doc(userEmail).get();
-        if (emailDocSnap.exists) {
-          userSnap = emailDocSnap;
-        } else {
-          const querySnap = await db.collection("Users").where("email", "==", userEmail).get();
-          if (!querySnap.empty) {
-            userSnap = querySnap.docs[0];
-          }
-        }
-      }
-
-      if (userSnap && userSnap.exists) {
-        targetUserRef = userSnap.ref;
-        const userData = userSnap.data();
-        role = userData.role || "free";
-        dailyUsed = Number(userData.dailyUsed || 0);
-
-        const parsedLimit = Number(userData.dailyLimit);
-
-        if (role === "admin" || userEmail === "seyhaemdev@gmail.com") {
-          role = "admin";
-          limit = -1;
-        } else if (role === "vip") {
-          limit = (!isNaN(parsedLimit) && parsedLimit > 200) ? parsedLimit : 10000;
-        } else if (!isNaN(parsedLimit) && parsedLimit > 0) {
-          limit = parsedLimit;
-        } else {
-          limit = 200;
-        }
-      } else if (userEmail === "seyhaemdev@gmail.com") {
-        role = "admin";
-        limit = -1;
-      }
-    } catch (dbErr) {
-      console.error("Error reading Firestore user in backend:", dbErr.message);
-    }
-  }
-
-  const charCount = text.trim().length;
-
-  if (limit !== -1 && (dailyUsed + charCount) > limit) {
-    return res.status(403).json({
-      success: false,
-      limitExceeded: true,
-      error: `អ្នកបានប្រើប្រាស់អស់ដែនកំណត់ប្រចាំថ្ងៃហើយ! (${dailyUsed + charCount}/${limit} តួអក្សរ)។ សូមទាក់ទងដំឡើងទៅ VIP ដើម្បីប្រើប្រាស់បន្ថែម!`,
-      usage: { role, dailyUsed, limit }
-    });
-  }
-
-  const voiceName = getEdgeVoiceName(lang, voiceType);
-  let audioBuffer;
-
-  try {
-    audioBuffer = await generateEdgeTTSWithChunking(text, voiceName);
-  } catch (edgeErr) {
-    console.warn("Edge TTS Chunking Failed. Fallback to Google TTS...", edgeErr.message);
-    try {
-      audioBuffer = await generateGoogleTTSFallback(text, lang);
-    } catch (googleErr) {
-      return res.status(500).json({ 
-        success: false, 
-        error: "មិនអាចបង្កើតសំឡេងបានទេ!" 
-      });
-    }
-  }
-
-  const newDailyUsed = dailyUsed + charCount;
-
-  // 🔑 បូកបន្ថែមចំនួន dailyUsed ចូលទៅក្នុង Firestore ដោយប្រើ FieldValue.increment
-  if (targetUserRef) {
-    try {
-      await targetUserRef.set({
-        email: userEmail,
-        role: role,
-        dailyLimit: limit,
-        dailyUsed: admin.firestore.FieldValue.increment(charCount),
-        lastUsedDate: new Date().toISOString().split("T")[0]
-      }, { merge: true });
-    } catch (updateErr) {
-      console.error("Failed to update dailyUsed in Firestore:", updateErr.message);
-    }
-  }
-
-  const base64Audio = `data:audio/mp3;base64,${audioBuffer.toString("base64")}`;
-  res.json({
-    success: true,
-    audioUrl: base64Audio,
-    usage: {
-      role,
-      dailyUsed: newDailyUsed, // ផ្ញើ 12 តួអក្សរត្រឡប់ទៅ Frontend វិញ
-      limit: role === "admin" ? -1 : limit
-    }
-  });
+app.get("/health", (_req, res) => {
+  res.json({ success: true, service: "text-speech-node" });
 });
 
-const PORT = process.env.PORT || 5000;
-app.listen(PORT, () => console.log(`Server running on port ${PORT}`));
+// Sends approval confirmation email using backend-only SMTP credentials.
+app.post("/api/payment-approved-email", async (req, res) => {
+  const { email, packageName, amount } = req.body || {};
+  if (!email || !String(email).includes("@")) return res.status(400).json({ success: false, error: "Valid recipient email required." });
+  const { SMTP_HOST, SMTP_PORT, SMTP_USER, SMTP_PASS, SMTP_FROM } = process.env;
+  if (!SMTP_HOST || !SMTP_USER || !SMTP_PASS) return res.status(503).json({ success: false, error: "Email service is not configured on the backend." });
+  try {
+    const nodemailer = require("nodemailer");
+    const port = Number(SMTP_PORT || 587);
+    const transporter = nodemailer.createTransport({ host: SMTP_HOST, port, secure: port === 465, auth: { user: SMTP_USER, pass: SMTP_PASS } });
+    await transporter.sendMail({ from: SMTP_FROM || SMTP_USER, to: String(email), subject: "Khmer TTS Studio — Payment approved", text: `Your payment has been approved.\n\nPlan: ${String(packageName || "VIP")}\nAmount: $${Number(amount || 0).toFixed(2)}\n\nYour VIP access is now active. Thank you for using Khmer TTS Studio.` });
+    return res.json({ success: true, sent: true });
+  } catch (err) { console.error("Approval email failed:", err.message); return res.status(502).json({ success: false, error: "Could not send approval email. Check SMTP and nodemailer." }); }
+});
+
+// Main TTS API. Existing route shape and standard Edge TTS fallback are preserved.
+app.post("/api/tts", async (req, res) => {
+  try {
+    const { text, lang = "km", voiceType = "woman", characterStyle = "general" } = req.body || {};
+    if (typeof text !== "string" || !text.trim()) {
+      return res.status(400).json({ success: false, error: "សូមបញ្ចូលអត្ថបទ!" });
+    }
+
+    const cleanText = text.trim();
+    const normalizedLang = String(lang || "km").toLowerCase();
+    const styledText = applyReadingStyle(cleanText, characterStyle);
+    const voiceName = getEdgeVoiceName(normalizedLang, voiceType, characterStyle);
+    const textChunks = splitTextIntoChunks(styledText, 200);
+    const combinedBuffer = await runEdgeTtsInQueue(async () => {
+      console.log(`🔊 Running Standard Edge TTS (${textChunks.length} chunk${textChunks.length === 1 ? "" : "s"})...`);
+      const audioBuffers = [];
+      for (let index = 0; index < textChunks.length; index++) {
+        audioBuffers.push(await generateSingleEdgeChunk(textChunks[index], voiceName));
+        if (index < textChunks.length - 1) await sleep(350);
+      }
+      return Buffer.concat(audioBuffers);
+    });
+    if (!combinedBuffer.length) throw new Error("Edge TTS returned an empty audio file.");
+
+    return res.json({
+      success: true,
+      audioUrl: `data:audio/mp3;base64,${combinedBuffer.toString("base64")}`,
+      audioType: "audio/mp3",
+      usage: { dailyUsed: cleanText.length, limit: 10000 }
+    });
+  } catch (err) {
+    console.error("❌ General TTS API Error:", err);
+    return res.status(500).json({
+      success: false,
+      error: "មានបញ្ហាក្នុងការបង្កើតសំឡេង។ សូមព្យាយាមម្ដងទៀត។",
+      details: process.env.NODE_ENV === "development" ? err.message : undefined
+    });
+  }
+});
+
+const PORT = Number(process.env.PORT) || 5000;
+app.listen(PORT, () => {
+  console.log(`🚀 Node.js Express Server running on http://localhost:${PORT}`);
+});

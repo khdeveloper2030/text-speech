@@ -73,7 +73,7 @@ export default function Navbar({
           onClick={() => setAppLang(appLang === "km" ? "en" : "km")}
           style={{ padding: "6px 12px", cursor: "pointer", borderRadius: "8px", border: "1px solid #cbd5e1", background: "#f8fafc", fontWeight: "bold", fontSize: "12px", color: "#334155" }}
         >
-          {appLang === "km" ? "🇰🇭 KM" : "🇬🇧 EN"}
+          {appLang === "km" ? "KH" : "EN"}
         </button>
 
         <div className="auth-section">
@@ -92,7 +92,12 @@ export default function Navbar({
                   <ShieldCheck size={12} /> ADMIN
                 </span>
               )}
-              {userUsage?.role === "vip" && (
+              {(userUsage?.role === "plus" || userUsage?.role === "pro" || userUsage?.role === "vip pro") && (
+                <span style={{ background: "#2563eb", color: "#fff", padding: "3px 8px", borderRadius: "12px", fontSize: "10px", fontWeight: "bold", display: "flex", alignItems: "center", gap: "3px" }}>
+                  <Crown size={12} /> PLUS
+                </span>
+              )}
+              {(userUsage?.role === "vip" || userUsage?.role === "vip unlimited" || userUsage?.role === "unlimited") && (
                 <span style={{ background: "#d97706", color: "#fff", padding: "3px 8px", borderRadius: "12px", fontSize: "10px", fontWeight: "bold", display: "flex", alignItems: "center", gap: "3px" }}>
                   <Crown size={12} /> VIP
                 </span>
@@ -107,18 +112,10 @@ export default function Navbar({
                 onClick={logout} 
                 style={{ background: "#fef2f2", color: "#dc2626", border: "1px solid #fecaca", padding: "6px 12px", borderRadius: "8px", cursor: "pointer", display: "flex", alignItems: "center", gap: "6px", fontSize: "12px", fontWeight: "bold" }}
               >
-                <LogOut size={14} /> Log out
+                <LogOut size={14} /> {t.logout || "Log out"}
               </button>
             </div>
-          ) : (
-            <button 
-              onClick={handleLogin} 
-              disabled={isLoggingIn}
-              style={{ background: "#2563eb", color: "#ffffff", border: "none", padding: "8px 16px", borderRadius: "8px", cursor: "pointer", display: "flex", alignItems: "center", gap: "6px", fontSize: "13px", fontWeight: "bold" }}
-            >
-              <LogIn size={16} /> {isLoggingIn ? "Logging in..." : "Login"}
-            </button>
-          )}
+          ) : null}
         </div>
 
       </div>
