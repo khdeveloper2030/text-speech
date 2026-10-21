@@ -1,6 +1,6 @@
-import React, { useState, useEffect } from "react";
+import React, { useState, useEffect, useRef } from "react";
 import { auth, signInWithGoogle, logout, db, storage } from "./firebase";
-import { ref as storageRef, uploadBytesResumable, getDownloadURL, deleteObject } from "firebase/storage";
+import { ref as storageRef, uploadBytes, getDownloadURL, deleteObject } from "firebase/storage";
 import { onAuthStateChanged } from "firebase/auth";
 import { 
   doc, 
@@ -12,8 +12,6 @@ import {
   onSnapshot,
   getDoc,
   getDocs,
-  query,
-  where,
   serverTimestamp,
   runTransaction
 } from "firebase/firestore";
@@ -28,7 +26,6 @@ import "./App.css";
 export const formatGoogleDriveUrl = (url) => {
   if (!url) return "";
   const value = String(url).trim();
-  // If this is already a Google-hosted direct image URL, preserve it first.
   if (/^https?:\/\/lh[0-9]\.googleusercontent\.com\/d\//i.test(value)) return value;
   const filePathMatch = value.match(/drive\.google\.com\/file\/d\/([^/?]+)/i);
   const queryMatch = value.match(/[?&]id=([^&]+)/i);
@@ -44,13 +41,26 @@ export const getGoogleDriveImageFallbacks = (url) => {
   if (!idMatch) return [original];
   const id = idMatch[1];
   const urls = [];
-  // Try the configured URL itself first; this supports the exact lh3 URL in Firestore.
   urls.push(original);
   urls.push(`https://lh3.googleusercontent.com/d/${encodeURIComponent(id)}=w1200`);
   urls.push(`https://lh3.googleusercontent.com/d/${encodeURIComponent(id)}=s1200`);
   urls.push(`https://drive.google.com/thumbnail?id=${encodeURIComponent(id)}&sz=w1200`);
   urls.push(`https://drive.google.com/uc?export=view&id=${encodeURIComponent(id)}`);
   return [...new Set(urls)];
+};
+
+const formatDateDMY = (value) => {
+  if (!value) return "—";
+  let date;
+  if (typeof value?.toDate === "function") date = value.toDate();
+  else if (value instanceof Date) date = value;
+  else {
+    const raw = String(value).trim();
+    const match = raw.match(/^(\d{4})-(\d{2})-(\d{2})$/);
+    date = match ? new Date(Number(match[1]), Number(match[2]) - 1, Number(match[3])) : new Date(raw);
+  }
+  if (Number.isNaN(date.getTime())) return String(value);
+  return `${String(date.getDate()).padStart(2,"0")}-${String(date.getMonth()+1).padStart(2,"0")}-${date.getFullYear()}`;
 };
 
 const LANGUAGES = [
@@ -63,7 +73,6 @@ const LANGUAGES = [
   { code: "vi", name: "វៀតណាម (Vietnamese)" },
 ];
 
-// Keep only the two voice types supported by the current TTS backend.
 const VOICE_TYPES = [
   { id: "woman", name: "👩 ស្រី (Woman)" },
   { id: "man", name: "👨 ប្រុស (Man)" },
@@ -74,6 +83,7 @@ const CHARACTER_STYLES = [
   { id: "news", name: "📰 អានព័ត៌មាន (Reading News)" },
   { id: "story", name: "📖 អានរឿង (Story Telling)" },
 ];
+
 function App() {
   const [user, setUser] = useState(null);
   const [authReady, setAuthReady] = useState(false);
@@ -98,12 +108,16 @@ function App() {
   const [vipLoginPending, setVipLoginPending] = useState(false);
   const [error, setError] = useState("");
   const [showUpgradeModal, setShowUpgradeModal] = useState(false);
+  const [paymentRequired, setPaymentRequired] = useState(false);
   const [showLoginModal, setShowLoginModal] = useState(false);
   const [loginPlan, setLoginPlan] = useState("free");
   const [pendingPaymentEmail, setPendingPaymentEmail] = useState("");
   const [pendingPaymentUid, setPendingPaymentUid] = useState("");
   const [paymentSubmitting, setPaymentSubmitting] = useState(false);
   const [showPaymentSuccess, setShowPaymentSuccess] = useState(false);
+  const [showPaidApprovalModal, setShowPaidApprovalModal] = useState(false);
+  const previousPaymentStatuses = useRef({});
+  const [hasPendingPayment, setHasPendingPayment] = useState(false);
   const [paymentSubmitStage, setPaymentSubmitStage] = useState("");
   const [paymentReceiptFile, setPaymentReceiptFile] = useState(null);
   const [billingCycle, setBillingCycle] = useState("monthly");
@@ -115,6 +129,7 @@ function App() {
     role: "free",
     dailyUsed: 0,
     limit: 200,
+    vipExpiresAt: "",
   });
 
   const [paymentSettings, setPaymentSettings] = useState({
@@ -127,15 +142,14 @@ function App() {
     pay_month: 12,
     freeLimit: 200,
     vipProLimit: 10000,
-    vipProPrice: 10,
+    vipProPrice: 7,
     vipUnlimitedLimit: 50000,
-    vipUnlimitedPrice: 50,
+    vipUnlimitedPrice: 30,
     yearlyDiscountPercent: 10
   });
 
   const [paymentsList, setPaymentsList] = useState([]);
   const [usersList, setUsersList] = useState([]);
-
 
   useEffect(() => {
     try { sessionStorage.setItem("textSpeechCurrentTab", currentTab); } catch {}
@@ -159,18 +173,18 @@ function App() {
           qrCodeUrl: data.qrCodeUrl || "",
           gmail: data.gmail || "",
           telegram: data.telegram || "",
-          pay_month: data.pay_month !== undefined ? Number(data.pay_month) : 10,
+          pay_month: data.pay_month !== undefined ? Number(data.pay_month) : 12,
           freeLimit: data.freeLimit !== undefined ? Number(data.freeLimit) : 200,
           vipProLimit: data.vipProLimit !== undefined ? Number(data.vipProLimit) : 10000,
-          vipProPrice: data.vipProPrice !== undefined ? Number(data.vipProPrice) : 1.00,
+          vipProPrice: data.vipProPrice !== undefined ? Number(data.vipProPrice) : 7,
           vipUnlimitedLimit: data.vipUnlimitedLimit !== undefined ? Number(data.vipUnlimitedLimit) : 50000,
-          vipUnlimitedPrice: data.vipUnlimitedPrice !== undefined ? Number(data.vipUnlimitedPrice) : 3.00,
-          yearlyDiscountPercent: data.yearlyDiscountPercent !== undefined ? Number(data.yearlyDiscountPercent) : 5
+          vipUnlimitedPrice: data.vipUnlimitedPrice !== undefined ? Number(data.vipUnlimitedPrice) : 30,
+          yearlyDiscountPercent: data.yearlyDiscountPercent !== undefined ? Number(data.yearlyDiscountPercent) : 10
         });
       }
       setDbProgress((prev) => Math.min(90, prev + 25));
     });
-
+    
     const unsubAuth = onAuthStateChanged(auth, async (currentUser) => {
       setAuthReady(true);
       setUser(currentUser);
@@ -185,14 +199,10 @@ function App() {
         const userEmail = currentUser.email ? currentUser.email.toLowerCase().trim() : "";
         const isMasterAdmin = userEmail === "seyhaemdev@gmail.com";
 
-        // Sync Email Doc to UID Doc if exist
         const emailDocRef = doc(db, "Users", userEmail);
         const uidDocRef = doc(db, "Users", currentUser.uid);
 
         try {
-          // Seed the UID document from the legacy email document only when the
-          // UID document does not exist. Never overwrite newer Admin-approved
-          // role/limit/usage values with stale data on every login.
           const [uidSnap, emailSnap] = await Promise.all([getDoc(uidDocRef), getDoc(emailDocRef)]);
           if (!uidSnap.exists() && emailSnap.exists()) {
             const emailData = emailSnap.data();
@@ -206,16 +216,17 @@ function App() {
           let role = isMasterAdmin ? "admin" : "free";
           let limit = isMasterAdmin ? -1 : (paymentSettings.freeLimit || 200);
           let dailyUsed = 0;
+          let vipExpiresAt = "";
 
           if (docSnap.exists()) {
             const data = docSnap.data();
+            vipExpiresAt = data.vipExpiresAt || data.expiresAt || "";
             const rawRole = String(data.role || role).toLowerCase().trim();
             const isUnlimitedRole = rawRole === "vip unlimited" || rawRole === "vip_unlimited" || rawRole === "unlimited" || rawRole === "unlimited vip";
             const isVipRole = rawRole === "vip" || rawRole === "vip pro" || rawRole === "vip_pro" || rawRole === "plus" || rawRole === "pro" || isUnlimitedRole;
             const isVipTier = rawRole === "vip" || isUnlimitedRole;
             role = rawRole === "administrator" ? "admin" : (isUnlimitedRole ? "vip unlimited" : (isVipRole ? (rawRole === "vip" ? "vip" : "plus") : rawRole));
-            // New cumulative field avoids resetting the allowance every day.
-            // Migrate today's legacy dailyUsed value only when charactersUsed is absent.
+            
             const todayKey = new Date().toISOString().split("T")[0];
             const savedUsage = data.charactersUsed !== undefined
               ? data.charactersUsed
@@ -226,13 +237,7 @@ function App() {
             if (role === "admin" || isMasterAdmin) {
               limit = -1;
             } else if (isVipRole) {
-              // Total plan allowance: Plus = 10,000; VIP = 50,000 characters.
-              // Canonical tier defaults also repair older/stale User documents.
-              // Fixed plan defaults: Plus = 10,000 and VIP = 50,000.
-              // Per-user Admin overrides are applied only when customCharacterLimit is true.
               const tierDefault = isVipTier ? 50000 : 10000;
-              // Approved yearly subscriptions store their full 12-month allowance.
-              // Keep explicit Admin overrides and older records working as before.
               const savedTotalLimit = Number(data.totalCharacterLimit);
               limit = data.customCharacterLimit === true && Number.isFinite(parsedLimit) && parsedLimit > 0
                 ? parsedLimit
@@ -255,13 +260,38 @@ function App() {
             setCurrentTab("user");
           }
 
-          setUserUsage({ role, dailyUsed, limit });
+          setUserUsage({ role, dailyUsed, limit, vipExpiresAt });
+          // Free access is available to every signed-in Gmail account.
+          // Plus/VIP payment is requested only when the user chooses a paid plan.
+          // Never block the normal UI merely because a user has the free role.
+          setPaymentRequired(false);
+          if (isMasterAdmin || role === "admin" || ["plus", "vip", "vip unlimited"].includes(String(role).toLowerCase())) {
+            setShowUpgradeModal(false);
+          }
           setDbProgress(100);
           setTimeout(() => setDbLoading(false), 300);
         });
 
         const unsubPayments = onSnapshot(collection(db, "payments"), (snapshot) => {
-          setPaymentsList(snapshot.docs.map(d => ({ id: d.id, ...d.data() })));
+          const rows = snapshot.docs.map(d => ({ id: d.id, ...d.data() }));
+          setPaymentsList(rows);
+          const currentEmail = String(currentUser.email || "").toLowerCase().trim();
+          const nextStatuses = { ...previousPaymentStatuses.current };
+          rows.forEach((payment) => {
+            const paymentEmail = String(payment.email || payment.userEmail || "").toLowerCase().trim();
+            const status = String(payment.status || "pending").toLowerCase();
+            const previousStatus = previousPaymentStatuses.current[payment.id];
+            // Show a confirmation only when this signed-in user's payment changes from pending to approved.
+            if (paymentEmail === currentEmail && previousStatus === "pending" && status === "approved") {
+              setShowPaidApprovalModal(true);
+            }
+            nextStatuses[payment.id] = status;
+          });
+          previousPaymentStatuses.current = nextStatuses;
+          setHasPendingPayment(rows.some((payment) =>
+            String(payment.email || payment.userEmail || "").toLowerCase().trim() === currentEmail &&
+            String(payment.status || "pending").toLowerCase() === "pending"
+          ));
         }, (err) => {
           console.error("Payments collection listener failed:", err.code, err.message);
           if (isMasterAdmin) setError(`Payments Collection: ${err.code || "error"} — ${err.message || "Read failed"}`);
@@ -281,6 +311,8 @@ function App() {
       } else {
         setIsAdmin(false);
         setCurrentTab("user");
+        setPaymentRequired(false);
+        setShowUpgradeModal(false);
         setUserUsage({ role: "free", dailyUsed: 0, limit: paymentSettings.freeLimit || 200 });
         setDbProgress(100);
         setTimeout(() => setDbLoading(false), 300);
@@ -305,8 +337,6 @@ function App() {
     }
   };
 
-  // VIP plans require Google sign-in plus either an approved payment for that
-  // plan or a matching VIP role assigned by the admin in Users collection.
   const handleVipLogin = async (plan = "pro") => {
     if (isLoggingIn) return;
     const selectedPlan = plan === "unlimited" ? "unlimited" : "pro";
@@ -326,14 +356,12 @@ function App() {
       setPendingPaymentEmail(email);
       setPendingPaymentUid(signedInUser.uid || "");
       if (!email) throw new Error("Google account did not provide an email address.");
-      // Verify by UID-keyed User document. Reading Users/{email} may be denied by
-      // secure Firestore rules for normal users, so it must not block approved accounts.
+      
       const roleIsApproved = (data = {}) => {
         const role = String(data.role || "").toLowerCase().replace(/[_-]/g, " ").trim();
         const isAdminRole = role === "admin" || role === "administrator";
         const isVipRole = ["vip", "vip unlimited", "unlimited", "unlimited vip"].includes(role);
         const isPlusRole = ["plus", "pro", "vip pro"].includes(role);
-        // Plus approval must never unlock VIP. VIP requires VIP approval specifically.
         if (!isAdminRole && !(selectedPlan === "unlimited" ? isVipRole : isPlusRole)) return false;
         if (data.paymentStatus && String(data.paymentStatus).toLowerCase() === "unapproved") return false;
         if (data.vipExpiresAt) {
@@ -349,14 +377,11 @@ function App() {
         setShowLoginModal(false);
         setVipLoginPending(false);
       } else {
-        // Keep the Google session so the payment request can be written to Firestore.
-        // The centered payment modal stays in front until the user submits or closes it.
         setShowUpgradeModal(true);
         setVipLoginPending(false);
       }
     } catch (err) {
       console.error("VIP login verification failed:", err);
-      // Keep the session when possible so a pending payment request can still be submitted.
       setShowUpgradeModal(true);
       setVipLoginPending(false);
       setError("Could not verify VIP access. You can submit a pending payment request or retry.");
@@ -369,6 +394,7 @@ function App() {
     setAudioUrl("");
     setText("");
     setError("");
+    setHasPendingPayment(false);
     await logout();
   };
 
@@ -387,6 +413,9 @@ function App() {
     else await handleVipLogin(loginPlan);
   };
 
+  // ⭐️ ជំនួសមុខងារ Submit Payment ឱ្យអាប់ឡូតចូល Firebase Storage ផ្ទាល់ ⭐️
+ // ⭐️ ជំនួសមុខងារ Submit Payment ឱ្យអាប់ឡូតផ្ទាល់ពី Frontend ទៅ Firebase Storage
+// ⭐️ ជំនួសមុខងារ Submit Payment ឱ្យអាប់ឡូតផ្ទាល់ពី Frontend ទៅ Firebase Storage
   const handleSubmitPayment = async () => {
     const currentUser = auth.currentUser;
     const email = String(currentUser?.email || "").toLowerCase().trim();
@@ -400,57 +429,52 @@ function App() {
       alert(appLang === "km" ? "ឯកសារធំពេក។ សូមប្រើរូបភាព ឬ PDF តូចជាង 10MB។" : "Receipt is too large. Please use an image or PDF under 10MB."); return;
     }
     if (paymentSubmitting) return;
+
     setPaymentSubmitting(true);
-    setPaymentSubmitStage(appLang === "km" ? "កំពុងរក្សាទុកសំណើបង់ប្រាក់..." : "Saving payment request...");
     setError("");
     try {
       const receiptFile = paymentReceiptFile;
-      const paymentRecord = {
+      setPaymentSubmitStage(appLang === "km" ? "កំពុង Upload បង្កាន់ដៃទៅ Firebase Storage..." : "Uploading receipt to Firebase Storage...");
+      
+      // 1. អាប់ឡូតឯកសារផ្ទាល់ពី Frontend ទៅ Firebase Storage
+      const filePath = `receipts/${currentUser.uid}_${Date.now()}_${receiptFile.name}`;
+      const fileRef = storageRef(storage, filePath);
+      const snapshot = await uploadBytes(fileRef, receiptFile);
+      
+      // 2. យករសជា Download URL សម្រាប់ឱ្យ Admin មើលឃើញ
+      const receiptUrl = await getDownloadURL(snapshot.ref);
+
+      setPaymentSubmitStage(appLang === "km" ? "កំពុងរក្សាទុកសំណើបង់ប្រាក់..." : "Saving payment request...");
+      const monthlyLimit = Number(selectedPlanLimit) || (selectedVipPlan === "unlimited" ? 50000 : 10000);
+      const months = billingCycle === "yearly" ? 12 : 1;
+      const totalLimit = monthlyLimit * months;
+      
+      // 3. រក្សាទុកទិន្នន័យចូលទៅក្នុង Firestore payments Collection
+      await addDoc(collection(db, "payments"), {
         email, uid: currentUser.uid, userId: currentUser.uid, userEmail: email,
         packageName: `${selectedPlanName} ${billingCycle}`, plan: selectedVipPlan, billingCycle,
         amount: Number(selectedPlanPrice.toFixed(2)), currency: "USD", status: "pending",
-        characterLimit: selectedPlanLimit * selectedPlanDuration,
-        totalCharacterLimit: selectedPlanLimit * selectedPlanDuration,
-        bankName: paymentSettings.bankName || "", createdAt: serverTimestamp(),
-        source: "khmer-tts-studio", receiptUrl: "", receiptPath: "", receiptFileName: receiptFile.name,
-        receiptContentType: receiptFile.type || "application/octet-stream"
-      };
-      // First commit the request to Firestore. Receipt upload must not block the success popup.
-      const paymentRef = await addDoc(collection(db, "payments"), paymentRecord);
-      setPaymentReceiptFile(null);
-      setShowUpgradeModal(false);
-      setShowPaymentSuccess(true);
-      setPaymentSubmitting(false);
-      setPaymentSubmitStage("");
+        monthlyCharacterLimit: monthlyLimit, characterLimit: totalLimit, totalCharacterLimit: totalLimit,
+        subscriptionMonths: months, bankName: paymentSettings.bankName || "", createdAt: serverTimestamp(),
+        source: "khmer-tts-studio", receiptUrl, receiptPath: filePath, receiptStorage: "firebase-storage",
+        receiptFileName: receiptFile.name, receiptContentType: receiptFile.type || "application/octet-stream"
+      });
 
-      // Upload the receipt after the request exists. If Storage fails, Admin still sees Pending.
-      (async () => {
-        try {
-          const safeName = receiptFile.name.replace(/[^a-zA-Z0-9._-]/g, "_");
-          const receiptPath = `paymentReceipts/${currentUser.uid}/${Date.now()}-${safeName}`;
-          const receiptRef = storageRef(storage, receiptPath);
-          const uploadTask = uploadBytesResumable(receiptRef, receiptFile, { contentType: receiptFile.type || "application/octet-stream" });
-          const receiptSnapshot = await new Promise((resolve, reject) => {
-            const timeoutId = setTimeout(() => { uploadTask.cancel(); reject(new Error("Receipt upload timed out. Check Firebase Storage Rules and bucket configuration.")); }, 45000);
-            uploadTask.on("state_changed", () => {}, err => { clearTimeout(timeoutId); reject(err); }, () => { clearTimeout(timeoutId); resolve(uploadTask.snapshot); });
-          });
-          const receiptUrl = await getDownloadURL(receiptSnapshot.ref);
-          await updateDoc(paymentRef, { receiptUrl, receiptPath, receiptFileName: receiptFile.name, updatedAt: serverTimestamp() });
-        } catch (uploadError) {
-          console.error("Payment request saved, but receipt upload failed:", uploadError?.code, uploadError?.message);
-        }
-      })();
+      setPaymentReceiptFile(null);
+      setHasPendingPayment(true);
+      setPaymentRequired(false);
+      setShowUpgradeModal(false);
+      setShowPaymentSuccess(true); // Show confirmation that admin approval is pending.
     } catch (err) {
-      console.error("Payment submission failed:", { code: err?.code, message: err?.message, error: err });
-      const code = String(err?.code || "unknown");
-      const detail = String(err?.message || "Unknown Firebase error");
-      const message = appLang === "km" ? `មិនអាចរក្សាទុកសំណើបង់ប្រាក់បានទេ៖ ${code} — ${detail}` : `Could not save payment request: ${code} — ${detail}`;
+      console.error("Payment submission failed:", err);
+      const message = appLang === "km"
+        ? `មិនអាចផ្ញើសំណើបានទេ៖ ${err?.message || "សូមពិនិត្យ Firebase Rules"}`
+        : `Payment request failed: ${err?.message || "Check Firebase Rules."}`;
       setError(message); alert(message);
     } finally {
       setPaymentSubmitting(false); setPaymentSubmitStage("");
     }
   };
-
   const handleSetPaymentStatus = async (payment, status) => {
     if (status === "approved") return handleApprovePayment(payment);
     try {
@@ -463,16 +487,6 @@ function App() {
             totalCharacterLimit: Number(paymentSettings.freeLimit) || 200,
             vipExpiresAt: "", paymentStatus: "unapproved"
           }, { merge: true });
-          const uidCandidates = new Set([String(payment.uid || payment.userId || "").trim()]);
-          usersList.filter((u) => String(u.email || "").toLowerCase().trim() === email && u.id && u.id !== email)
-            .forEach((u) => uidCandidates.add(String(u.uid || u.id)));
-          for (const uid of uidCandidates) {
-            if (uid) await setDoc(doc(db, "Users", uid), {
-              email, uid, role: "free", dailyLimit: Number(paymentSettings.freeLimit) || 200,
-              totalCharacterLimit: Number(paymentSettings.freeLimit) || 200,
-              vipExpiresAt: "", paymentStatus: "unapproved"
-            }, { merge: true });
-          }
         }
       }
     } catch (err) {
@@ -526,7 +540,6 @@ function App() {
     }
 
     const currentTextLength = text.trim().length;
-    // Character allowance is cumulative across successful generations until the plan allowance is used.
     const usedCharacters = Math.max(0, Number(userUsage.dailyUsed) || 0);
     const remainingCharacters = userUsage.limit === -1 ? Infinity : Math.max(0, userUsage.limit - usedCharacters);
     if (userUsage.limit !== -1 && currentTextLength > remainingCharacters) {
@@ -550,7 +563,6 @@ function App() {
     try {
       const idToken = await user.getIdToken();
       
-      // Standard TTS only: send JSON to the speech API.
       const response = await fetch(`${BACKEND_URL}/api/tts`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -564,7 +576,6 @@ function App() {
 
       if (data.success && data.audioUrl) {
         setAudioUrl(data.audioUrl);
-        // Count only successful generations: e.g. 6 + 6 = 12, then +6 = 18.
         let nextUsed = usedCharacters + currentTextLength;
         try {
           const usageRef = doc(db, "Users", user.uid);
@@ -585,8 +596,6 @@ function App() {
             return updatedUsed;
           });
         } catch (usageSaveError) {
-          // Keep the current session accurate, while reporting persistence failure
-          // in the console instead of hiding the successfully generated audio.
           console.warn("Could not persist character usage:", usageSaveError?.code || usageSaveError?.message || usageSaveError);
         }
         setUserUsage((prev) => ({ ...prev, dailyUsed: nextUsed }));
@@ -599,7 +608,6 @@ function App() {
 
       } else {
         setError(data.error || "មានបញ្ហាក្នុងការបម្លែងសំឡេង!");
-        // Do not open payment UI inside the signed-in TTS interface.
       }
     } catch (err) {
       clearInterval(interval);
@@ -643,11 +651,10 @@ function App() {
         charactersUsed: Number(userData.dailyUsed || 0),
         totalCharacterLimit: Number.isFinite(limitVal) ? limitVal : 0,
         lastUsedDate: userData.lastUsedDate || new Date().toISOString().split('T')[0],
+        paymentDate: userData.paymentDate || "",
+        billingCycle: userData.billingCycle || "monthly",
         vipExpiresAt: userData.vipExpiresAt || ""
       };
-      // Save the legacy email document and every actual matching UID document.
-      // usersList is intentionally deduplicated for display, so it must not be
-      // used as the source of truth for updating all matching Firestore docs.
       await setDoc(doc(db, "Users", targetEmail), record, { merge: true });
       const allUsersSnapshot = await getDocs(collection(db, "Users"));
       const matchingDocs = allUsersSnapshot.docs.filter((snap) => {
@@ -671,8 +678,7 @@ function App() {
       if (!targetEmail) throw new Error("Payment record has no email.");
       const planKey = String(payment.plan || "").toLowerCase().replace(/[_-]/g, " ").trim();
       const packageText = String(payment.packageName || "").toLowerCase().replace(/[_-]/g, " ").trim();
-      // The structured payment.plan field is authoritative. In particular, do not
-      // classify a Plus/Pro payment as VIP just because its package label contains "VIP".
+      
       let isUnlimited;
       if (["plus", "pro", "vip pro"].includes(planKey)) {
         isUnlimited = false;
@@ -683,10 +689,9 @@ function App() {
           && !/\b(vip pro|plus|pro)\b/i.test(packageText);
       }
       const role = isUnlimited ? "vip" : "plus";
-      // Fixed defaults are deliberate; Admin can set an individual custom limit in User Management.
       const perMonthLimit = isUnlimited ? 50000 : 10000;
       const billingCycle = String(payment.billingCycle || "monthly").toLowerCase();
-      const subscriptionMonths = billingCycle === "yearly" ? 12 : Math.max(1, Number(paymentSettings.pay_month) || 1);
+      const subscriptionMonths = billingCycle === "yearly" ? 12 : 1;
       const dailyLimit = Number(payment.totalCharacterLimit || payment.characterLimit) > 0
         ? Number(payment.totalCharacterLimit || payment.characterLimit)
         : perMonthLimit * (billingCycle === "yearly" ? 12 : 1);
@@ -696,8 +701,26 @@ function App() {
       );
       const existingSnap = matchingUserDocs.find((snap) => snap.id !== targetEmail) || matchingUserDocs[0];
       const existingData = existingSnap ? existingSnap.data() : {};
-      const expiry = new Date();
-      expiry.setMonth(expiry.getMonth() + subscriptionMonths);
+      // Calculate expiry from the payment date (createdAt), not the day the admin clicks Approve.
+      // Monthly plans last 30 days; yearly plans last 365 days.
+      const toValidDate = (value) => {
+        if (!value) return null;
+        try {
+          const parsed = typeof value?.toDate === "function"
+            ? value.toDate()
+            : value instanceof Date
+              ? value
+              : new Date(value);
+          return Number.isNaN(parsed.getTime()) ? null : parsed;
+        } catch {
+          return null;
+        }
+      };
+      const paymentDate = toValidDate(
+        payment.paymentDate || payment.paidAt || payment.createdAt || payment.submittedAt || payment.approvedAt
+      ) || new Date();
+      const expiry = new Date(paymentDate);
+      expiry.setDate(expiry.getDate() + (billingCycle === "yearly" ? 365 : 30));
       const activationData = {
         email: targetEmail,
         role,
@@ -707,11 +730,9 @@ function App() {
         dailyUsed: Number(existingData.charactersUsed ?? existingData.dailyUsed ?? 0),
         charactersUsed: Number(existingData.charactersUsed ?? existingData.dailyUsed ?? 0),
         lastUsedDate: existingData.lastUsedDate || new Date().toISOString().split("T")[0],
+        paymentDate: paymentDate.toISOString().split("T")[0],
         vipExpiresAt: expiry.toISOString().split("T")[0],
       };
-      // Update the canonical email record, the payment UID, and every real
-      // UID-keyed document matching this email. This avoids stale role/limit
-      // data being left behind by the deduplicated Admin table.
       await setDoc(doc(db, "Users", targetEmail), { ...activationData, paymentStatus: "approved" }, { merge: true });
       const uidCandidates = new Set([String(payment.uid || payment.userId || "").trim()]);
       matchingUserDocs.forEach((snap) => {
@@ -722,10 +743,16 @@ function App() {
       for (const uid of uidCandidates) {
         if (uid) await setDoc(doc(db, "Users", uid), { ...activationData, uid, paymentStatus: "approved" }, { merge: true });
       }
-      await updateDoc(doc(db, "payments", payment.id), { status: "approved", approvedAt: serverTimestamp(), updatedAt: serverTimestamp() });
+      await updateDoc(doc(db, "payments", payment.id), {
+        status: "approved",
+        paymentDate: paymentDate.toISOString().split("T")[0],
+        vipExpiresAt: expiry.toISOString().split("T")[0],
+        approvedAt: serverTimestamp(),
+        updatedAt: serverTimestamp()
+      });
       try { const emailResponse = await fetch(`${BACKEND_URL}/api/payment-approved-email`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ email: targetEmail, packageName: payment.packageName || (isUnlimited ? "VIP" : "Plus"), amount: payment.amount || 0 }) }); if (!emailResponse.ok) console.warn("Approval email service returned", emailResponse.status); }
       catch (emailErr) { console.warn("Approval email could not be sent:", emailErr); }
-      alert(`Approved ${targetEmail} as ${isUnlimited ? "VIP" : "Plus"}. Check backend SMTP configuration if email was not delivered.`);
+      alert(`Approved ${targetEmail} as ${isUnlimited ? "VIP" : "Plus"}.`);
     } catch (err) {
       console.error("Payment approval failed:", err);
       alert("Could not approve payment: " + (err.message || "Unknown error"));
@@ -733,14 +760,26 @@ function App() {
   };
 
   const handleDeleteUser = async (userId) => {
-    if (window.confirm("តើអ្នកពិតជាចង់លុប User នេះមែនទេ?")) {
-      try {
-        await deleteDoc(doc(db, "Users", userId));
-        alert("លុប User បានដោយជោគជ័យ!");
-      } catch (err) {
-        console.error("Error deleting user:", err);
-        alert("មានបញ្ហាក្នុងការលុប User!");
+    // One click deletes the selected document and duplicate email/UID documents
+    // that otherwise make the same user appear to remain in the list.
+    try {
+      const target = (usersList || []).find((item) => item.id === userId);
+      const targetEmail = String(target?.email || (userId.includes("@") ? userId : "")).toLowerCase().trim();
+      const candidates = new Set([String(userId)]);
+      if (targetEmail) {
+        const allUsersSnapshot = await getDocs(collection(db, "Users"));
+        allUsersSnapshot.docs.forEach((snap) => {
+          const data = snap.data();
+          if (String(data.email || "").toLowerCase().trim() === targetEmail || snap.id.toLowerCase() === targetEmail) {
+            candidates.add(snap.id);
+          }
+        });
       }
+      await Promise.all([...candidates].map((id) => deleteDoc(doc(db, "Users", id))));
+      alert("លុប User បានដោយជោគជ័យ!");
+    } catch (err) {
+      console.error("Error deleting user:", err);
+      alert("មានបញ្ហាក្នុងការលុប User: " + (err.message || "Unknown error"));
     }
   };
 
@@ -759,7 +798,7 @@ function App() {
   const openGmail = () => {
     const recipient = paymentSettings.gmail || "seyhaemdev@gmail.com";
     const subject = encodeURIComponent(`VIP Payment - ${selectedPlanName} (${billingCycle}) - $${selectedPlanPrice.toFixed(2)}`);
-    const body = encodeURIComponent(`Hello Admin,\n\nI would like to request/confirm ${selectedPlanName}.\nBilling cycle: ${billingCycle}.\nAmount: $${selectedPlanPrice.toFixed(2)}.\nUser Email: ${user?.email || ""}\n\nI will attach my payment receipt for verification.`);
+    const body = encodeURIComponent(`Hello Admin,\n\nI would like to request/confirm ${selectedPlanName}.\nBilling cycle: ${billingCycle}.\nAmount: $${selectedPlanPrice.toFixed(2)}.\nUser Email: ${user?.email || ""}\n\nI have uploaded my payment receipt.`);
     window.open(`https://mail.google.com/mail/?view=cm&fs=1&to=${recipient}&su=${subject}&body=${body}`, "_blank");
   };
 
@@ -779,29 +818,13 @@ function App() {
   const selectedYearlyPrice = Number(selectedVipPlan === "unlimited" ? vipUnlimitedYearlyPrice : vipProYearlyPrice) || 0;
   const selectedPlanPrice = billingCycle === "yearly" ? selectedYearlyPrice : selectedMonthlyPrice;
   const selectedPlanLimit = Number(selectedVipPlan === "unlimited" ? paymentSettings.vipUnlimitedLimit : paymentSettings.vipProLimit) || 0;
-  const selectedPlanDuration = billingCycle === "yearly" ? 12 : Math.max(1, Number(paymentSettings.pay_month) || 1);
+  const selectedPlanDuration = billingCycle === "yearly" ? 12 : 1;
 
   const userIsAdmin = user && (isAdmin || userUsage.role === "admin" || user.email?.toLowerCase().trim() === "seyhaemdev@gmail.com");
 
-  useEffect(() => { if (user) setShowUpgradeModal(false); }, [user]);
 
   return (
     <div className="container">
-      {/* {dbLoading && (
-        <div style={{ position: "fixed", top: 0, left: 0, right: 0, zIndex: 9999, background: "#ffffff", padding: "12px 20px", boxShadow: "0 2px 10px rgba(0,0,0,0.1)", display: "flex", alignItems: "center", gap: "12px" }}>
-          <Database className="spin" size={20} color="#2563eb" />
-          <div style={{ flex: 1 }}>
-            <div style={{ display: "flex", justifyContent: "space-between", fontSize: "12px", fontWeight: "bold", color: "#1e293b", marginBottom: "4px" }}>
-              <span>កំពុងទាញយកទិន្នន័យពី Firebase Firestore...</span>
-              <span>{dbProgress}%</span>
-            </div>
-            <div style={{ background: "#e2e8f0", height: "6px", borderRadius: "10px", overflow: "hidden" }}>
-              <div style={{ width: `${dbProgress}%`, background: "#2563eb", height: "100%", transition: "width 0.2s" }} />
-            </div>
-          </div>
-        </div>
-      )} */}
-
       <Navbar 
         user={user}
         isAdmin={userIsAdmin}
@@ -817,7 +840,6 @@ function App() {
       />
 
       <main className="main-content" style={{ marginTop: dbLoading ? "50px" : "0px", padding: "20px" }}>
-        
         {userIsAdmin && (
           <div style={{ 
             display: "flex", 
@@ -860,8 +882,16 @@ function App() {
           </div>
         )}
 
-        {!authReady ? (
+        {(!authReady || (user && !userIsAdmin && dbLoading)) ? (
           <div style={{ minHeight: "40vh", display: "grid", placeItems: "center", color: "#64748b" }}>Loading...</div>
+        ) : (vipLoginPending || (paymentRequired && user && !userIsAdmin)) ? (
+          <div style={{ minHeight: "55vh", display: "grid", placeItems: "center", textAlign: "center", color: "#475569", padding: "24px" }}>
+            <div>
+              <Crown size={38} style={{ color: "#7c3aed", marginBottom: "12px" }} />
+              <h2 style={{ margin: "0 0 8px", color: "#0f172a" }}>{appLang === "km" ? "កំពុងផ្ទៀងផ្ទាត់គម្រោង" : "Checking plan status"}</h2>
+              <p style={{ margin: 0 }}>{appLang === "km" ? "សូមរង់ចាំបន្តិច..." : "Please wait..."}</p>
+            </div>
+          </div>
         ) : !user ? (
           <PlansLanding
             appLang={appLang}
@@ -872,6 +902,16 @@ function App() {
             t={t}
           />
         ) : currentTab === "user" ? (
+          <>
+          {hasPendingPayment && (
+            <div role="status" style={{ maxWidth: 800, margin: "18px auto 0", padding: "14px 18px", borderRadius: 12, border: "1px solid #fcd34d", background: "#fffbeb", color: "#92400e", display: "flex", gap: 10, alignItems: "flex-start" }}>
+              <Crown size={20} style={{ flexShrink: 0, marginTop: 2 }} />
+              <div>
+                <strong>{appLang === "km" ? "កំពុងរង់ចាំ Admin បញ្ជាក់ការទូទាត់" : "Waiting for admin payment confirmation"}</strong>
+                <div style={{ marginTop: 4, fontSize: 13 }}>{appLang === "km" ? "សំណើបង់ប្រាក់របស់អ្នកបានទទួលហើយ។ អ្នកអាចប្រើគម្រោង Free ខណៈពេលរង់ចាំការអនុម័ត។" : "Your payment request was received. You can continue using the Free plan while waiting for approval."}</div>
+              </div>
+            </div>
+          )}
           <TTSSection 
             t={t}
             userUsage={userUsage}
@@ -895,6 +935,7 @@ function App() {
             VOICE_TYPES={VOICE_TYPES}
             CHARACTER_STYLES={CHARACTER_STYLES}
           />
+          </>
         ) : (
           <AdminPanel 
             appLang={appLang}
@@ -912,6 +953,25 @@ function App() {
           />
         )}
       </main>
+
+      {showPaidApprovalModal && (
+        <div role="dialog" aria-modal="true" aria-labelledby="payment-approved-title" className="modal-overlay" style={{ position: "fixed", inset: 0, zIndex: 10001, display: "flex", alignItems: "center", justifyContent: "center", background: "rgba(15,23,42,.72)", padding: 16 }}>
+          <div style={{ width: "100%", maxWidth: 440, background: "#fff", color: "#0f172a", borderRadius: 18, padding: 28, textAlign: "center", boxShadow: "0 24px 70px rgba(0,0,0,.25)" }}>
+            <div style={{ width: 64, height: 64, borderRadius: "50%", background: "#dcfce7", color: "#15803d", display: "flex", alignItems: "center", justifyContent: "center", margin: "0 auto 14px" }}>
+              <Shield size={34} />
+            </div>
+            <h2 id="payment-approved-title" style={{ margin: "0 0 10px", fontSize: 22 }}>
+              {appLang === "km" ? "ការបង់ប្រាក់របស់អ្នកត្រូវបានអនុម័ត!" : "Your payment has been approved!"}
+            </h2>
+            <p style={{ margin: "0 0 22px", lineHeight: 1.6, color: "#475569" }}>
+              {appLang === "km" ? "Admin បានអនុម័តគណនីរបស់អ្នករួចរាល់ហើយ។ ចុចប៊ូតុងខាងក្រោម ដើម្បីចូលប្រើកម្មវិធី។" : "The admin has approved your payment. Click below to enter the project."}
+            </p>
+            <button type="button" onClick={() => setShowPaidApprovalModal(false)} style={{ width: "100%", border: 0, borderRadius: 10, padding: "12px 18px", background: "#15803d", color: "#fff", fontWeight: 800, cursor: "pointer", fontSize: 15 }}>
+              {appLang === "km" ? "ចូលទៅកម្មវិធី" : "Go to project"}
+            </button>
+          </div>
+        </div>
+      )}
 
       {showPaymentSuccess && (
         <div className="modal-overlay" style={{ position: "fixed", inset: 0, zIndex: 9999, display: "flex", alignItems: "center", justifyContent: "center", background: "rgba(15,23,42,.62)", padding: 20 }} role="dialog" aria-modal="true">
@@ -943,7 +1003,7 @@ function App() {
       {showUpgradeModal && (
         <div className="modal-overlay">
           <div className="modal-content" style={{ borderRadius: "16px", padding: "24px", maxWidth: "550px", width: "90%" }}>
-            <button className="modal-close" onClick={() => setShowUpgradeModal(false)}>
+            <button className="modal-close" onClick={() => setShowUpgradeModal(false)} aria-label={appLang === "km" ? "បិទបង្អួចបង់ប្រាក់" : "Close payment window"} title={appLang === "km" ? "បិទ / បោះបង់" : "Close / Cancel"}>
               <X size={20} />
             </button>
 
@@ -975,7 +1035,6 @@ function App() {
                   {billingCycle === "yearly" && discountPercent > 0 && <div style={{ color: "#047857", fontSize: 11 }}>{appLang === "km" ? `សន្សំ ${discountPercent}%` : `Save ${discountPercent}%`}</div>}
                 </div>
               </div>
-
             </div>
 
             <div className="qr-section" style={{ textAlign: "center", background: "#f8fafc", padding: "16px", borderRadius: "14px", border: "1px solid #e2e8f0", marginBottom: "16px" }}>
@@ -985,13 +1044,12 @@ function App() {
                   <img key={qrImageSrc} src={qrImageSrc} alt="Payment QR code" referrerPolicy="no-referrer" onError={() => { if (qrFallbackIndex + 1 < qrImageFallbacks.length) setQrFallbackIndex((index) => index + 1); else setQrImageFailed(true); }} style={{ width: "220px", height: "220px", borderRadius: "8px", objectFit: "contain" }} />
                 ) : (
                   <div style={{ width: 220, minHeight: 150, display: "grid", placeItems: "center", padding: 14, boxSizing: "border-box", color: "#92400e", fontSize: 12, background: "#fffbeb", borderRadius: 8 }}>
-                    <div><Database size={24} style={{ marginBottom: 8 }} /><div>{appLang === "km" ? "QR Code មិនអាចបង្ហាញបានទេ។ សូមពិនិត្យថា URL នេះជារូបភាព QR ពិតប្រាកដ ហើយ Google Drive អនុញ្ញាតឱ្យមើលដោយសាធារណៈ។" : "QR code could not load. Confirm settings.qrCodeUrl points to the actual QR image and is publicly viewable."}</div></div>
+                    <div><Database size={24} style={{ marginBottom: 8 }} /><div>{appLang === "km" ? "QR Code មិនអាចបង្ហាញបានទេ។" : "QR code could not load."}</div></div>
                   </div>
                 )}
                 <div style={{ marginTop: "10px", fontSize: "13px", fontWeight: "bold", color: "#0f172a" }}>{paymentSettings.bankName}: {paymentSettings.accountNumber}</div>
               </div>
               <div style={{ marginTop: 12, fontSize: 13, color: "#334155" }}><strong>{appLang === "km" ? "ចំនួនត្រូវបង់៖" : "Amount due:"} ${selectedPlanPrice.toFixed(2)}</strong></div>
-              <div style={{ marginTop: 4, fontSize: 11, color: "#64748b" }}>{appLang === "km" ? "បន្ទាប់ពីបង់ប្រាក់ សូមផ្ញើ Receipt តាម Telegram ឬ Gmail ដើម្បីឱ្យ Admin ផ្ទៀងផ្ទាត់។" : "After paying, send your receipt by Telegram or Gmail for admin verification."}</div>
             </div>
 
             <div style={{ margin: "14px 0", padding: 14, border: "1px dashed #94a3b8", borderRadius: 10, background: "#f8fafc" }}>
@@ -1000,12 +1058,9 @@ function App() {
               </label>
               <input id="payment-receipt-upload" type="file" accept="image/*,application/pdf" onChange={(e) => setPaymentReceiptFile(e.target.files?.[0] || null)} style={{ width: "100%" }} />
               {paymentReceiptFile && <p style={{ marginTop: 6, fontSize: 12, color: "#166534" }}>{paymentReceiptFile.name}</p>}
-              <p style={{ marginTop: 5, fontSize: 11, color: "#64748b" }}>{appLang === "km" ? "សូម Scan QR បង់ប្រាក់ រួច Upload រូបបង្កាន់ដៃមកទីនេះ។" : "Scan the QR code, complete payment, then upload the receipt here."}</p>
             </div>
+
             <div className="contact-buttons" style={{ textAlign: "center" }}>
-              <p style={{ margin: "0 0 10px 0", fontSize: "12px", color: "#475569", fontWeight: "bold" }}>
-                {appLang === "km" ? `ផ្ញើ Receipt សម្រាប់ ${selectedPlanName} (${billingCycle === "yearly" ? "ប្រចាំឆ្នាំ" : "ប្រចាំខែ"}) — $${selectedPlanPrice.toFixed(2)} ទៅកាន់Admin` : `Send receipt for ${selectedPlanName} (${billingCycle}) — $${selectedPlanPrice.toFixed(2)} to Admin`}
-              </p>
               <div style={{ display: "flex", gap: "10px", justifyContent: "center" }}>
                 <a 
                   href={paymentSettings.telegram || "https://t.me/em_seyha"} 
@@ -1028,15 +1083,12 @@ function App() {
                 disabled={paymentSubmitting}
                 style={{ width: "100%", marginTop: 14, display: "flex", alignItems: "center", justifyContent: "center", gap: 8, background: paymentSubmitting ? "#94a3b8" : "linear-gradient(135deg,#059669,#047857)", color: "#fff", border: 0, padding: "13px 16px", borderRadius: 10, fontWeight: 800, cursor: paymentSubmitting ? "wait" : "pointer" }}
               >
-                {paymentSubmitting ? (appLang === "km" ? "កំពុងផ្ញើ..." : "Submitting...") : (appLang === "km" ? "ខ្ញុំបានបង់ប្រាក់ — ផ្ញើសំណើទៅ Admin" : "I have paid — submit payment request")}
+                {paymentSubmitting ? (appLang === "km" ? paymentSubmitStage || "កំពុងផ្ញើ..." : "Submitting...") : (appLang === "km" ? "ខ្ញុំបានបង់ប្រាក់ — ផ្ញើសំណើទៅ Admin" : "I have paid — submit payment request")}
               </button>
-              <p style={{ margin: "8px 0 0", fontSize: 11, color: "#64748b" }}>{appLang === "km" ? "សំណើនឹងរក្សាទុកក្នុងប្រព័ន្ធ ជាស្ថានភាព Pending រង់ចាំ Admin អនុម័ត។ ការចុចប៊ូតុងនេះមិនបញ្ជាក់ថាបានបង់ប្រាក់រួចទេ។" : "This creates a pending Firebase payment record. It does not itself verify that payment was received."}</p>
             </div>
-
           </div>
         </div>
       )}
-
     </div>
   );
 }

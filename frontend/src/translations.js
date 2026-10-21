@@ -30,7 +30,11 @@ export const TRANSLATIONS = {
     upgrade: "ដំឡើងទៅ VIP",
     paymentHint: "មើលតម្លៃគម្រោង និងជម្រើសបង់ប្រាក់",
     outputTitle: "លទ្ធផលសំឡេង",
-    download: "ទាញយកឯកសារ"
+    download: "ទាញយកឯកសារ",
+    planDeadline: "ថ្ងៃផុតកំណត់គម្រោង៖",
+    close: "បិទ",
+    cancel: "បោះបង់",
+    dateFormat: "ថ្ងៃ-ខែ-ឆ្នាំ"
   },
   en: {
     title: "Text-to-Speech App",
@@ -63,6 +67,10 @@ export const TRANSLATIONS = {
     upgrade: "Upgrade to VIP",
     paymentHint: "View plan prices and payment options",
     outputTitle: "Generated audio",
-    download: "Download file"
+    download: "Download file",
+    planDeadline: "Plan expiration:",
+    close: "Close",
+    cancel: "Cancel",
+    dateFormat: "DD-MM-YYYY"
   }
 };

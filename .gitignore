@@ -33,3 +33,6 @@ backend/dist/
 # OS files
 .DS_Store
 Thumbs.db
+
+#backend upload
+backend/tts-drive-uploader.json

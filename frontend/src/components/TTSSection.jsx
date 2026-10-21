@@ -2,22 +2,39 @@ import React from "react";
 import { Download, RefreshCw, AlertCircle } from "lucide-react";
 
 export default function TTSSection({
-  t, userUsage, usagePercentage, language, setLanguage, voiceType, setVoiceType,
+  t, appLang = "km", userUsage, usagePercentage, language, setLanguage, voiceType, setVoiceType,
   characterStyle, setCharacterStyle, text, setText, error, loading, progress,
   handleGenerateTTS, handleDownload, audioUrl, LANGUAGES,
   VOICE_TYPES, CHARACTER_STYLES
 }) {
   const isUnlimited = userUsage.role === "admin" || userUsage.limit === -1;
+  const formatDateDMY = (value) => {
+    if (!value) return "—";
+    const raw = String(value);
+    const match = raw.match(/^(\\d{4})-(\\d{2})-(\\d{2})$/);
+    const date = match ? new Date(Number(match[1]), Number(match[2]) - 1, Number(match[3])) : new Date(value);
+    if (Number.isNaN(date.getTime())) return raw;
+    return `${String(date.getDate()).padStart(2, "0")}-${String(date.getMonth() + 1).padStart(2, "0")}-${date.getFullYear()}`;
+  };
 
   return (
     <div className="tts-card" style={{ maxWidth: "800px", margin: "24px auto", padding: "28px", background: "#ffffff", borderRadius: "16px", boxShadow: "0 10px 25px -5px rgba(0,0,0,0.05)" }}>
       
       {/* 1. Cumulative plan allowance meter: successful generation adds characters to used total. */}
       <div className="usage-container" style={{ marginBottom: "20px" }}>
-        <div style={{ display: "flex", justifyContent: "space-between", marginBottom: "8px", fontSize: "14px", fontWeight: "bold" }}>
-          <span>{t.characters || "Characters in this request"}</span>
+        <div style={{ display: "flex", justifyContent: "space-between", flexWrap: "wrap", gap: "8px", marginBottom: "8px", fontSize: "14px", fontWeight: "bold" }}>
+          <span>{t.characters || "Characters used / allowance"}</span>
           <span>{isUnlimited ? (t.unlimited || "Unlimited") : `${Number(userUsage.dailyUsed || 0).toLocaleString()} / ${Number(userUsage.limit).toLocaleString()}`}</span>
         </div>
+        {userUsage.vipExpiresAt && (() => {
+          const expiry = new Date(userUsage.vipExpiresAt);
+          const validExpiry = !Number.isNaN(expiry.getTime());
+          return validExpiry ? (
+            <div style={{ marginBottom: "10px", fontSize: "13px", color: expiry < new Date() ? "#dc2626" : "#475569" }}>
+              {t.planDeadline || (appLang === "km" ? "ថ្ងៃផុតកំណត់គម្រោង៖" : "Plan expiration:")} {formatDateDMY(userUsage.vipExpiresAt)}
+            </div>
+          ) : null;
+        })()}
         {!isUnlimited && (
           <div style={{ width: "100%", height: "8px", background: "#e2e8f0", borderRadius: "10px", overflow: "hidden" }}>
             <div style={{ width: `${Math.min(100, (Number(userUsage.dailyUsed || 0) / Math.max(1, userUsage.limit)) * 100)}%`, height: "100%", background: Number(userUsage.dailyUsed || 0) >= userUsage.limit ? "#ef4444" : "#2563eb", transition: "width 0.3s" }} />
