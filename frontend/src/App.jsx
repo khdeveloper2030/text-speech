@@ -15,7 +15,7 @@ import {
   serverTimestamp,
   runTransaction
 } from "firebase/firestore";
-import { LogIn, X, Mail, Send, Database, User, Shield, Crown } from "lucide-react";
+import { LogIn, X, Mail, Send, Database, User, Shield, Crown, LoaderCircle } from "lucide-react";
 import { TRANSLATIONS } from "./translations";
 import Navbar from "./components/Navbar";
 import TTSSection from "./components/TTSSection";
@@ -33,6 +33,8 @@ export const formatGoogleDriveUrl = (url) => {
   const fileId = (filePathMatch && filePathMatch[1]) || (queryMatch && queryMatch[1]) || (googleusercontentMatch && googleusercontentMatch[1]);
   return fileId ? `https://lh3.googleusercontent.com/d/${encodeURIComponent(fileId)}=w1200` : value;
 };
+
+const SETTINGS_DOC_ID = "h4syLlqcg33B60hE3b1B";
 
 export const getGoogleDriveImageFallbacks = (url) => {
   const original = String(url || "").trim();
@@ -132,8 +134,11 @@ function App() {
     vipExpiresAt: "",
   });
 
+  const [pricingLoaded, setPricingLoaded] = useState(false);
+  const [pricingAvailable, setPricingAvailable] = useState(false);
+
   const [paymentSettings, setPaymentSettings] = useState({
-    docId: "h4syLlqcg33B60hE3b1B",
+    docId: SETTINGS_DOC_ID,
     bankName: "",
     accountNumber: "",
     qrCodeUrl: "https://lh3.googleusercontent.com/d/1xK0ufr7n0hYWBK9Fdr_JQAY35H1vqx6n",
@@ -142,9 +147,9 @@ function App() {
     pay_month: 12,
     freeLimit: 200,
     vipProLimit: 10000,
-    vipProPrice: 7,
+    vipProPrice: 3,
     vipUnlimitedLimit: 50000,
-    vipUnlimitedPrice: 30,
+    vipUnlimitedPrice: 14,
     yearlyDiscountPercent: 10
   });
 
@@ -155,6 +160,39 @@ function App() {
     try { sessionStorage.setItem("textSpeechCurrentTab", currentTab); } catch {}
   }, [currentTab]);
 
+  // Public pricing contains no bank/account details, so PlansLanding can show
+  // the latest prices even before a visitor signs in.
+  useEffect(() => {
+    const publicPricingRef = doc(db, "publicConfig", "pricing");
+    const unsubPublicPricing = onSnapshot(publicPricingRef, { includeMetadataChanges: true }, (pricingSnap) => {
+      // Ignore cached snapshots so old cached prices are never shown while
+      // waiting for the latest server values.
+      if (pricingSnap.metadata.fromCache) return;
+      if (!pricingSnap.exists()) {
+        setPricingAvailable(false);
+        setPricingLoaded(true);
+        return;
+      }
+      const pricing = pricingSnap.data();
+      setPaymentSettings((previous) => ({
+        ...previous,
+        freeLimit: pricing.freeLimit !== undefined ? Number(pricing.freeLimit) : previous.freeLimit,
+        vipProLimit: pricing.vipProLimit !== undefined ? Number(pricing.vipProLimit) : previous.vipProLimit,
+        vipProPrice: pricing.vipProPrice !== undefined ? Number(pricing.vipProPrice) : previous.vipProPrice,
+        vipUnlimitedLimit: pricing.vipUnlimitedLimit !== undefined ? Number(pricing.vipUnlimitedLimit) : previous.vipUnlimitedLimit,
+        vipUnlimitedPrice: pricing.vipUnlimitedPrice !== undefined ? Number(pricing.vipUnlimitedPrice) : previous.vipUnlimitedPrice,
+        yearlyDiscountPercent: pricing.yearlyDiscountPercent !== undefined ? Number(pricing.yearlyDiscountPercent) : previous.yearlyDiscountPercent
+      }));
+      setPricingAvailable(true);
+      setPricingLoaded(true);
+    }, (err) => {
+      console.error("Public pricing listener failed:", err.code, err.message);
+      setPricingAvailable(false);
+      setPricingLoaded(true);
+    });
+    return () => unsubPublicPricing();
+  }, []);
+
   const t = TRANSLATIONS[appLang] || TRANSLATIONS.km;
   const BACKEND_URL = process.env.REACT_APP_BACKEND_URL || "http://localhost:5000";
 
@@ -162,165 +200,225 @@ function App() {
     setDbLoading(true);
     setDbProgress(30);
 
-    const unsubSettings = onSnapshot(collection(db, "settings"), (snapshot) => {
-      if (!snapshot.empty) {
-        const targetDoc = snapshot.docs.find(d => d.id === "h4syLlqcg33B60hE3b1B") || snapshot.docs[0];
-        const data = targetDoc.data();
-        setPaymentSettings({
-          docId: targetDoc.id,
-          bankName: data.bankName || "",
-          accountNumber: data.accountNumber || "",
-          qrCodeUrl: data.qrCodeUrl || "",
-          gmail: data.gmail || "",
-          telegram: data.telegram || "",
-          pay_month: data.pay_month !== undefined ? Number(data.pay_month) : 12,
-          freeLimit: data.freeLimit !== undefined ? Number(data.freeLimit) : 200,
-          vipProLimit: data.vipProLimit !== undefined ? Number(data.vipProLimit) : 10000,
-          vipProPrice: data.vipProPrice !== undefined ? Number(data.vipProPrice) : 7,
-          vipUnlimitedLimit: data.vipUnlimitedLimit !== undefined ? Number(data.vipUnlimitedLimit) : 50000,
-          vipUnlimitedPrice: data.vipUnlimitedPrice !== undefined ? Number(data.vipUnlimitedPrice) : 30,
-          yearlyDiscountPercent: data.yearlyDiscountPercent !== undefined ? Number(data.yearlyDiscountPercent) : 10
-        });
+    // Firestore rules require authentication to read the private settings document.
+    // Start the settings listener only after Firebase confirms the signed-in user.
+    let unsubSettings = null;
+    let unsubUser = null;
+    let unsubPayments = null;
+    let unsubUsersList = null;
+    let authGeneration = 0;
+
+    const stopUserListeners = () => {
+      if (unsubUser) { unsubUser(); unsubUser = null; }
+      if (unsubPayments) { unsubPayments(); unsubPayments = null; }
+      if (unsubUsersList) { unsubUsersList(); unsubUsersList = null; }
+    };
+
+    const applySettingsSnapshot = (settingsSnap) => {
+      if (!settingsSnap.exists()) {
+        console.warn(
+          `Canonical settings document settings/${SETTINGS_DOC_ID} does not exist. ` +
+          "The app will keep its current defaults instead of loading a random legacy document."
+        );
+        return;
       }
+      const data = settingsSnap.data();
+      console.log("[Settings Debug]", {
+        documentId: settingsSnap.id,
+        vipProPrice: data.vipProPrice,
+        vipUnlimitedPrice: data.vipUnlimitedPrice,
+        updatedAt: data.updatedAt
+      });
+      setPaymentSettings({
+        docId: SETTINGS_DOC_ID,
+        bankName: data.bankName ?? "",
+        accountNumber: data.accountNumber ?? "",
+        qrCodeUrl: data.qrCodeUrl ?? "https://lh3.googleusercontent.com/d/1xK0ufr7n0hYWBK9Fdr_JQAY35H1vqx6n",
+        gmail: data.gmail ?? "seyhaemdev@gmail.com",
+        telegram: data.telegram ?? "https://t.me/em_seyha",
+        pay_month: data.pay_month !== undefined ? Number(data.pay_month) : 12,
+        freeLimit: data.freeLimit !== undefined ? Number(data.freeLimit) : 200,
+        vipProLimit: data.vipProLimit !== undefined ? Number(data.vipProLimit) : 10000,
+        vipProPrice: data.vipProPrice !== undefined ? Number(data.vipProPrice) : 3,
+        vipUnlimitedLimit: data.vipUnlimitedLimit !== undefined ? Number(data.vipUnlimitedLimit) : 50000,
+        vipUnlimitedPrice: data.vipUnlimitedPrice !== undefined ? Number(data.vipUnlimitedPrice) : 14,
+        yearlyDiscountPercent: data.yearlyDiscountPercent !== undefined ? Number(data.yearlyDiscountPercent) : 10
+      });
       setDbProgress((prev) => Math.min(90, prev + 25));
-    });
-    
+    };
+
     const unsubAuth = onAuthStateChanged(auth, async (currentUser) => {
+      const generation = ++authGeneration;
+      if (unsubSettings) { unsubSettings(); unsubSettings = null; }
+      stopUserListeners();
+
       setAuthReady(true);
       setUser(currentUser);
       const authEmail = String(currentUser?.email || "").toLowerCase().trim();
-      if (authEmail === "seyhaemdev@gmail.com") { setIsAdmin(true); setCurrentTab("admin"); }
+      if (authEmail === "seyhaemdev@gmail.com") {
+        setIsAdmin(true);
+        setCurrentTab("admin");
+      }
       setAudioUrl("");
       setText("");
       setError("");
       setProgress(0);
 
-      if (currentUser) {
-        const userEmail = currentUser.email ? currentUser.email.toLowerCase().trim() : "";
-        const isMasterAdmin = userEmail === "seyhaemdev@gmail.com";
-
-        const emailDocRef = doc(db, "Users", userEmail);
-        const uidDocRef = doc(db, "Users", currentUser.uid);
-
-        try {
-          const [uidSnap, emailSnap] = await Promise.all([getDoc(uidDocRef), getDoc(emailDocRef)]);
-          if (!uidSnap.exists() && emailSnap.exists()) {
-            const emailData = emailSnap.data();
-            await setDoc(uidDocRef, { ...emailData, email: userEmail, uid: currentUser.uid }, { merge: true });
-          }
-        } catch (e) {
-          console.warn("Legacy User document migration skipped:", e?.code || e?.message || e);
-        }
-
-        const unsubUser = onSnapshot(uidDocRef, (docSnap) => {
-          let role = isMasterAdmin ? "admin" : "free";
-          let limit = isMasterAdmin ? -1 : (paymentSettings.freeLimit || 200);
-          let dailyUsed = 0;
-          let vipExpiresAt = "";
-
-          if (docSnap.exists()) {
-            const data = docSnap.data();
-            vipExpiresAt = data.vipExpiresAt || data.expiresAt || "";
-            const rawRole = String(data.role || role).toLowerCase().trim();
-            const isUnlimitedRole = rawRole === "vip unlimited" || rawRole === "vip_unlimited" || rawRole === "unlimited" || rawRole === "unlimited vip";
-            const isVipRole = rawRole === "vip" || rawRole === "vip pro" || rawRole === "vip_pro" || rawRole === "plus" || rawRole === "pro" || isUnlimitedRole;
-            const isVipTier = rawRole === "vip" || isUnlimitedRole;
-            role = rawRole === "administrator" ? "admin" : (isUnlimitedRole ? "vip unlimited" : (isVipRole ? (rawRole === "vip" ? "vip" : "plus") : rawRole));
-            
-            const todayKey = new Date().toISOString().split("T")[0];
-            const savedUsage = data.charactersUsed !== undefined
-              ? data.charactersUsed
-              : (String(data.lastUsedDate || "") === todayKey ? data.dailyUsed : 0);
-            dailyUsed = Math.max(0, Number(savedUsage || 0) || 0);
-            const parsedLimit = Number(data.dailyLimit);
-
-            if (role === "admin" || isMasterAdmin) {
-              limit = -1;
-            } else if (isVipRole) {
-              const tierDefault = isVipTier ? 50000 : 10000;
-              const savedTotalLimit = Number(data.totalCharacterLimit);
-              limit = data.customCharacterLimit === true && Number.isFinite(parsedLimit) && parsedLimit > 0
-                ? parsedLimit
-                : (Number.isFinite(savedTotalLimit) && savedTotalLimit > 0
-                    ? savedTotalLimit
-                    : tierDefault);
-            } else if (!isNaN(parsedLimit) && parsedLimit > 0) {
-              limit = parsedLimit;
-            } else {
-              limit = paymentSettings.freeLimit || 200;
-            }
-          }
-
-          if (isMasterAdmin || role === "admin") {
-            setIsAdmin(true);
-            role = "admin";
-            limit = -1;
-          } else {
-            setIsAdmin(false);
-            setCurrentTab("user");
-          }
-
-          setUserUsage({ role, dailyUsed, limit, vipExpiresAt });
-          // Free access is available to every signed-in Gmail account.
-          // Plus/VIP payment is requested only when the user chooses a paid plan.
-          // Never block the normal UI merely because a user has the free role.
-          setPaymentRequired(false);
-          if (isMasterAdmin || role === "admin" || ["plus", "vip", "vip unlimited"].includes(String(role).toLowerCase())) {
-            setShowUpgradeModal(false);
-          }
-          setDbProgress(100);
-          setTimeout(() => setDbLoading(false), 300);
-        });
-
-        const unsubPayments = onSnapshot(collection(db, "payments"), (snapshot) => {
-          const rows = snapshot.docs.map(d => ({ id: d.id, ...d.data() }));
-          setPaymentsList(rows);
-          const currentEmail = String(currentUser.email || "").toLowerCase().trim();
-          const nextStatuses = { ...previousPaymentStatuses.current };
-          rows.forEach((payment) => {
-            const paymentEmail = String(payment.email || payment.userEmail || "").toLowerCase().trim();
-            const status = String(payment.status || "pending").toLowerCase();
-            const previousStatus = previousPaymentStatuses.current[payment.id];
-            // Show a confirmation only when this signed-in user's payment changes from pending to approved.
-            if (paymentEmail === currentEmail && previousStatus === "pending" && status === "approved") {
-              setShowPaidApprovalModal(true);
-            }
-            nextStatuses[payment.id] = status;
-          });
-          previousPaymentStatuses.current = nextStatuses;
-          setHasPendingPayment(rows.some((payment) =>
-            String(payment.email || payment.userEmail || "").toLowerCase().trim() === currentEmail &&
-            String(payment.status || "pending").toLowerCase() === "pending"
-          ));
-        }, (err) => {
-          console.error("Payments collection listener failed:", err.code, err.message);
-          if (isMasterAdmin) setError(`Payments Collection: ${err.code || "error"} — ${err.message || "Read failed"}`);
-        });
-
-        const unsubUsersList = onSnapshot(collection(db, "Users"), (snapshot) => {
-          const unique = new Map();
-          snapshot.docs.forEach(d => { const item = { id: d.id, ...d.data() }; const key = String(item.email || item.id).toLowerCase().trim(); if (!unique.has(key) || item.id === String(item.email || "").toLowerCase().trim()) unique.set(key, item); });
-          setUsersList([...unique.values()]);
-        });
-
-        return () => {
-          unsubUser();
-          unsubPayments();
-          unsubUsersList();
-        };
-      } else {
+      if (!currentUser) {
         setIsAdmin(false);
         setCurrentTab("user");
         setPaymentRequired(false);
         setShowUpgradeModal(false);
-        setUserUsage({ role: "free", dailyUsed: 0, limit: paymentSettings.freeLimit || 200 });
+        setUserUsage({ role: "free", dailyUsed: 0, limit: 200 });
+        setDbProgress(100);
+        setDbLoading(false);
+        return;
+      }
+
+      // Settings are private (bank/account details), so read them only after login.
+      unsubSettings = onSnapshot(
+        doc(db, "settings", SETTINGS_DOC_ID),
+        applySettingsSnapshot,
+        (err) => {
+          console.error("Settings document listener failed:", err.code, err.message);
+          setError(`Settings: ${err.code || "error"} — ${err.message || "Read failed"}`);
+        }
+      );
+
+      const userEmail = String(currentUser.email || "").toLowerCase().trim();
+      const isMasterAdmin = userEmail === "seyhaemdev@gmail.com";
+      const emailDocRef = doc(db, "Users", userEmail);
+      const uidDocRef = doc(db, "Users", currentUser.uid);
+
+      try {
+        const [uidSnap, emailSnap] = await Promise.all([getDoc(uidDocRef), getDoc(emailDocRef)]);
+        if (generation !== authGeneration) return;
+        if (!uidSnap.exists() && emailSnap.exists()) {
+          const emailData = emailSnap.data();
+          await setDoc(uidDocRef, { ...emailData, email: userEmail, uid: currentUser.uid }, { merge: true });
+        }
+      } catch (e) {
+        console.warn("Legacy User document migration skipped:", e?.code || e?.message || e);
+      }
+      if (generation !== authGeneration) return;
+
+      unsubUser = onSnapshot(uidDocRef, (docSnap) => {
+        let role = isMasterAdmin ? "admin" : "free";
+        let limit = isMasterAdmin ? -1 : 200;
+        let dailyUsed = 0;
+        let vipExpiresAt = "";
+
+        if (docSnap.exists()) {
+          const data = docSnap.data();
+          vipExpiresAt = data.vipExpiresAt || data.expiresAt || "";
+          const rawRole = String(data.role || role).toLowerCase().trim();
+          const isUnlimitedRole = rawRole === "vip unlimited" || rawRole === "vip_unlimited" || rawRole === "unlimited" || rawRole === "unlimited vip";
+          const isVipRole = rawRole === "vip" || rawRole === "vip pro" || rawRole === "vip_pro" || rawRole === "plus" || rawRole === "pro" || isUnlimitedRole;
+          const isVipTier = rawRole === "vip" || isUnlimitedRole;
+          role = rawRole === "administrator" ? "admin" : (isUnlimitedRole ? "vip unlimited" : (isVipRole ? (rawRole === "vip" ? "vip" : "plus") : rawRole));
+
+          const todayKey = new Date().toISOString().split("T")[0];
+          const savedUsage = data.charactersUsed !== undefined
+            ? data.charactersUsed
+            : (String(data.lastUsedDate || "") === todayKey ? data.dailyUsed : 0);
+          dailyUsed = Math.max(0, Number(savedUsage || 0) || 0);
+          const parsedLimit = Number(data.dailyLimit);
+
+          if (role === "admin" || isMasterAdmin) {
+            limit = -1;
+          } else if (isVipRole) {
+            const tierDefault = isVipTier ? 50000 : 10000;
+            const savedTotalLimit = Number(data.totalCharacterLimit);
+            limit = data.customCharacterLimit === true && Number.isFinite(parsedLimit) && parsedLimit > 0
+              ? parsedLimit
+              : (Number.isFinite(savedTotalLimit) && savedTotalLimit > 0 ? savedTotalLimit : tierDefault);
+          } else if (!isNaN(parsedLimit) && parsedLimit > 0) {
+            limit = parsedLimit;
+          } else {
+            limit = 200;
+          }
+        }
+
+        const roleIsPaid = ["plus", "vip", "vip unlimited"].includes(String(role).toLowerCase());
+        let pendingPlan = "";
+        try { pendingPlan = localStorage.getItem("textSpeechPendingVipPlan") || ""; } catch {}
+        const pendingPlanIsApproved = pendingPlan === "unlimited"
+          ? ["vip", "vip unlimited"].includes(String(role).toLowerCase())
+          : pendingPlan === "pro"
+            ? String(role).toLowerCase() === "plus"
+            : roleIsPaid;
+
+        if (isMasterAdmin || role === "admin") {
+          setIsAdmin(true);
+          role = "admin";
+          limit = -1;
+          setShowUpgradeModal(false);
+          try { localStorage.removeItem("textSpeechPendingVipPlan"); } catch {}
+        } else {
+          setIsAdmin(false);
+          setCurrentTab("user");
+          if (roleIsPaid && pendingPlanIsApproved) {
+            // The selected plan is approved; don't show payment after refresh.
+            setShowUpgradeModal(false);
+            try { localStorage.removeItem("textSpeechPendingVipPlan"); } catch {}
+          } else if (pendingPlan === "pro" || pendingPlan === "unlimited") {
+            // Preserve the selected paid plan across refresh until that tier is approved.
+            setSelectedVipPlan(pendingPlan);
+            setShowUpgradeModal(true);
+          }
+        }
+
+        setUserUsage({ role, dailyUsed, limit, vipExpiresAt });
+        setPaymentRequired(false);
         setDbProgress(100);
         setTimeout(() => setDbLoading(false), 300);
-      }
+      }, (err) => {
+        console.error("User document listener failed:", err.code, err.message);
+        setError(`User: ${err.code || "error"} — ${err.message || "Read failed"}`);
+        setDbLoading(false);
+      });
+
+      unsubPayments = onSnapshot(collection(db, "payments"), (snapshot) => {
+        const rows = snapshot.docs.map(d => ({ id: d.id, ...d.data() }));
+        setPaymentsList(rows);
+        const currentEmail = String(currentUser.email || "").toLowerCase().trim();
+        const nextStatuses = { ...previousPaymentStatuses.current };
+        rows.forEach((payment) => {
+          const paymentEmail = String(payment.email || payment.userEmail || "").toLowerCase().trim();
+          const status = String(payment.status || "pending").toLowerCase();
+          const previousStatus = previousPaymentStatuses.current[payment.id];
+          if (paymentEmail === currentEmail && previousStatus === "pending" && status === "approved") {
+            setShowPaidApprovalModal(true);
+          }
+          nextStatuses[payment.id] = status;
+        });
+        previousPaymentStatuses.current = nextStatuses;
+        setHasPendingPayment(rows.some((payment) =>
+          String(payment.email || payment.userEmail || "").toLowerCase().trim() === currentEmail &&
+          String(payment.status || "pending").toLowerCase() === "pending"
+        ));
+      }, (err) => {
+        console.error("Payments collection listener failed:", err.code, err.message);
+        if (isMasterAdmin) setError(`Payments Collection: ${err.code || "error"} — ${err.message || "Read failed"}`);
+      });
+
+      unsubUsersList = onSnapshot(collection(db, "Users"), (snapshot) => {
+        const unique = new Map();
+        snapshot.docs.forEach(d => {
+          const item = { id: d.id, ...d.data() };
+          const key = String(item.email || item.id).toLowerCase().trim();
+          if (!unique.has(key) || item.id === String(item.email || "").toLowerCase().trim()) unique.set(key, item);
+        });
+        setUsersList([...unique.values()]);
+      }, (err) => {
+        console.error("Users collection listener failed:", err.code, err.message);
+      });
     });
 
     return () => {
-      unsubSettings();
+      authGeneration += 1;
+      if (unsubSettings) unsubSettings();
+      stopUserListeners();
       unsubAuth();
     };
   }, []);
@@ -341,6 +439,7 @@ function App() {
     if (isLoggingIn) return;
     const selectedPlan = plan === "unlimited" ? "unlimited" : "pro";
     setSelectedVipPlan(selectedPlan);
+    try { localStorage.setItem("textSpeechPendingVipPlan", selectedPlan); } catch {}
     setBillingCycle("monthly");
     setQrImageFailed(false);
     setQrFallbackIndex(0);
@@ -376,6 +475,7 @@ function App() {
         setShowUpgradeModal(false);
         setShowLoginModal(false);
         setVipLoginPending(false);
+        try { localStorage.removeItem("textSpeechPendingVipPlan"); } catch {}
       } else {
         setShowUpgradeModal(true);
         setVipLoginPending(false);
@@ -784,14 +884,44 @@ function App() {
   };
 
   const handleSavePaymentSettings = async (e) => {
-    e.preventDefault();
+    if (e && typeof e.preventDefault === "function") e.preventDefault();
     try {
-      const docId = paymentSettings.docId || "h4syLlqcg33B60hE3b1B";
-      await setDoc(doc(db, "settings", docId), paymentSettings, { merge: true });
+      // Use one stable document ID so the listener and the save operation never
+      // write/read different settings documents after refresh or deployment.
+      const settingsToSave = {
+        bankName: String(paymentSettings.bankName ?? ""),
+        accountNumber: String(paymentSettings.accountNumber ?? ""),
+        qrCodeUrl: String(paymentSettings.qrCodeUrl ?? ""),
+        gmail: String(paymentSettings.gmail ?? ""),
+        telegram: String(paymentSettings.telegram ?? ""),
+        pay_month: Number(paymentSettings.pay_month ?? 12),
+        freeLimit: Number(paymentSettings.freeLimit ?? 200),
+        vipProLimit: Number(paymentSettings.vipProLimit ?? 10000),
+        vipProPrice: Number(paymentSettings.vipProPrice ?? 3),
+        vipUnlimitedLimit: Number(paymentSettings.vipUnlimitedLimit ?? 50000),
+        vipUnlimitedPrice: Number(paymentSettings.vipUnlimitedPrice ?? 14),
+        yearlyDiscountPercent: Number(paymentSettings.yearlyDiscountPercent ?? 10),
+        updatedAt: serverTimestamp()
+      };
+      // Keep private payment details in settings; publish only non-sensitive plan data
+      // separately so the Plans page can read current prices before login.
+      await Promise.all([
+        setDoc(doc(db, "settings", SETTINGS_DOC_ID), settingsToSave, { merge: true }),
+        setDoc(doc(db, "publicConfig", "pricing"), {
+          freeLimit: settingsToSave.freeLimit,
+          vipProLimit: settingsToSave.vipProLimit,
+          vipProPrice: settingsToSave.vipProPrice,
+          vipUnlimitedLimit: settingsToSave.vipUnlimitedLimit,
+          vipUnlimitedPrice: settingsToSave.vipUnlimitedPrice,
+          yearlyDiscountPercent: settingsToSave.yearlyDiscountPercent,
+          updatedAt: serverTimestamp()
+        }, { merge: true })
+      ]);
+      setPaymentSettings((previous) => ({ ...previous, ...settingsToSave, docId: SETTINGS_DOC_ID }));
       alert("រក្សាទុកព័ត៌មានទូទាត់ និង Pricing Settings ចូល Firestore បានដោយជោគជ័យ!");
     } catch (err) {
       console.error("Error saving payment settings:", err);
-      alert("មានបញ្ហាក្នុងការរក្សាទុក!");
+      alert("មានបញ្ហាក្នុងការរក្សាទុក: " + (err?.message || "Unknown error"));
     }
   };
 
@@ -822,6 +952,18 @@ function App() {
 
   const userIsAdmin = user && (isAdmin || userUsage.role === "admin" || user.email?.toLowerCase().trim() === "seyhaemdev@gmail.com");
 
+  // On refresh, show a full-screen spinner until Firebase auth and the data
+  // required for the correct screen have finished loading. This prevents the
+  // previous/default UI from flashing before the final screen is known.
+  const appStartupLoading = !authReady || (!user && !pricingLoaded) || (Boolean(user) && dbLoading);
+  if (appStartupLoading) {
+    return (
+      <div className="app-startup-loading" role="status" aria-live="polite">
+        <LoaderCircle className="app-startup-spinner" size={48} strokeWidth={2.5} aria-hidden="true" />
+        <p>{appLang === "km" ? "កំពុងផ្ទុកកម្មវិធី... សូមរង់ចាំ" : "Loading app... Please wait"}</p>
+      </div>
+    );
+  }
 
   return (
     <div className="container">
@@ -896,6 +1038,8 @@ function App() {
           <PlansLanding
             appLang={appLang}
             settings={paymentSettings}
+            pricingLoaded={pricingLoaded}
+            pricingAvailable={pricingAvailable}
             onFreeClick={() => requestLogin("free")}
             onVipClick={(plan) => requestLogin(plan)}
             isLoggingIn={isLoggingIn}
@@ -1003,7 +1147,7 @@ function App() {
       {showUpgradeModal && (
         <div className="modal-overlay">
           <div className="modal-content" style={{ borderRadius: "16px", padding: "24px", maxWidth: "550px", width: "90%" }}>
-            <button className="modal-close" onClick={() => setShowUpgradeModal(false)} aria-label={appLang === "km" ? "បិទបង្អួចបង់ប្រាក់" : "Close payment window"} title={appLang === "km" ? "បិទ / បោះបង់" : "Close / Cancel"}>
+            <button className="modal-close" onClick={() => { setShowUpgradeModal(false); try { localStorage.removeItem("textSpeechPendingVipPlan"); } catch {} }} aria-label={appLang === "km" ? "បិទបង្អួចបង់ប្រាក់" : "Close payment window"} title={appLang === "km" ? "បិទ / បោះបង់" : "Close / Cancel"}>
               <X size={20} />
             </button>
 

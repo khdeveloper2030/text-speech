@@ -1,9 +1,10 @@
 import React from "react";
 import { Check, Crown, LogIn, Sparkles, ShieldCheck, Zap, Headphones, ArrowRight } from "lucide-react";
 
-export default function PlansLanding({ appLang, settings, onFreeClick, onVipClick, isLoggingIn }) {
+export default function PlansLanding({ appLang, settings, pricingLoaded, pricingAvailable, onFreeClick, onVipClick, isLoggingIn }) {
   const km = appLang === "km";
   const money = (value) => `$${Number(value || 0).toFixed(2)}`;
+  const pricingText = (value) => !pricingLoaded ? (km ? "កំពុងផ្ទុក..." : "Loading...") : (!pricingAvailable ? (km ? "មិនអាចផ្ទុកតម្លៃបាន" : "Pricing unavailable") : value);
   const features = (items) => items.map((item) => (
     <li key={item}><Check size={16} aria-hidden="true" /> <span>{item}</span></li>
   ));
@@ -32,7 +33,7 @@ export default function PlansLanding({ appLang, settings, onFreeClick, onVipClic
           <p className="plan-description">{km ? "សាកល្បងបង្កើតសំឡេង មុនពេលដំឡើងគម្រោង។" : "Explore text-to-speech with no payment required."}</p>
           <div className="plan-price">$0 <span>/{km ? "ជានិច្ច" : "forever"}</span></div>
           <div className="plan-divider" />
-          <ul>{features([`${Number(settings.freeLimit || 200).toLocaleString()} ${km ? "តួអក្សរសរុប" : "total characters included"}`, km ? "សំឡេង TTS ស្តង់ដារ" : "Standard TTS access", km ? "ចូលប្រើដោយ Google" : "Google account sign-in"])}</ul>
+          <ul>{features([`${!pricingLoaded ? (km ? "កំពុងផ្ទុក..." : "Loading...") : (!pricingAvailable ? (km ? "មិនអាចផ្ទុកតម្លៃបាន" : "Pricing unavailable") : `${Number(settings.freeLimit || 200).toLocaleString()} ${km ? "តួអក្សរសរុប" : "total characters included"}`)}`, km ? "សំឡេង TTS ស្តង់ដារ" : "Standard TTS access", km ? "ចូលប្រើដោយ Google" : "Google account sign-in"])}</ul>
           <button className="plan-button plan-button-free" onClick={onFreeClick} disabled={isLoggingIn}>{isLoggingIn ? (km ? "កំពុងចូល..." : "Signing in...") : <>{km ? "ចាប់ផ្តើមដោយឥតគិតថ្លៃ" : "Get started free"}<ArrowRight size={17}/></>}</button>
         </article>
         <article className="plan-card plan-card-vip">
@@ -40,18 +41,18 @@ export default function PlansLanding({ appLang, settings, onFreeClick, onVipClic
           <div className="plan-card-top"><div className="plan-icon vip-icon"><Crown size={22} /></div><span className="plan-label">PLUS</span></div>
           <h3>Plus</h3>
           <p className="plan-description">{km ? "សម្រាប់អ្នកបង្កើតមាតិកាដែលត្រូវការដែនកំណត់សរុប 10,000 តួអក្សរ។" : "For creators who need a 10,000-character total allowance."}</p>
-          <div className="plan-price">{money(settings.vipProPrice)} <span>/{km ? "ខែ" : "month"}</span></div>
+          <div className="plan-price">{pricingText(money(settings.vipProPrice))} <span>/{km ? "ខែ" : "month"}</span></div>
           <div className="plan-divider" />
-          <ul>{features([`${Number(settings.vipProLimit || 10000).toLocaleString()} ${km ? "តួអក្សរសរុប" : "total characters included"}`, km ? "ជម្រើសសំឡេង និងរបៀបអាន" : "Voice and reading-style options", km ? "បើកប្រើក្រោយ Admin អនុម័ត" : "Access after admin approval"])}</ul>
+          <ul>{features([`${!pricingLoaded ? (km ? "កំពុងផ្ទុក..." : "Loading...") : (!pricingAvailable ? (km ? "មិនអាចផ្ទុកតម្លៃបាន" : "Pricing unavailable") : `${Number(settings.vipProLimit || 10000).toLocaleString()} ${km ? "តួអក្សរសរុប" : "total characters included"}`)}`, km ? "ជម្រើសសំឡេង និងរបៀបអាន" : "Voice and reading-style options", km ? "បើកប្រើក្រោយ Admin អនុម័ត" : "Access after admin approval"])}</ul>
           <button className="plan-button plan-button-vip" onClick={() => onVipClick("pro")} disabled={isLoggingIn}><Crown size={17}/>{km ? "ជ្រើសរើស Plus" : "Choose Plus"}<ArrowRight size={17}/></button>
         </article>
         <article className="plan-card plan-card-unlimited">
           <div className="plan-card-top"><div className="plan-icon unlimited-icon"><Sparkles size={22} /></div><span className="plan-label">{km ? "ការប្រើប្រាស់ច្រើន" : "POWER USERS"}</span></div>
           <h3>VIP</h3>
           <p className="plan-description">{km ? "សម្រាប់អ្នកត្រូវការដែនកំណត់ខ្ពស់ និងការងារច្រើន។" : "For heavy workloads and frequent voice generation."}</p>
-          <div className="plan-price">{money(settings.vipUnlimitedPrice)} <span>/{km ? "ខែ" : "month"}</span></div>
+          <div className="plan-price">{pricingText(money(settings.vipUnlimitedPrice))} <span>/{km ? "ខែ" : "month"}</span></div>
           <div className="plan-divider" />
-          <ul>{features([`${Number(settings.vipUnlimitedLimit || 50000).toLocaleString()} ${km ? "តួអក្សរសរុប" : "total characters included"}`, km ? "សម្រាប់ការងារច្រើន" : "More room for larger projects", km ? "បើកប្រើក្រោយ Admin អនុម័ត" : "Access after admin approval"])}</ul>
+          <ul>{features([`${!pricingLoaded ? (km ? "កំពុងផ្ទុក..." : "Loading...") : (!pricingAvailable ? (km ? "មិនអាចផ្ទុកតម្លៃបាន" : "Pricing unavailable") : `${Number(settings.vipUnlimitedLimit || 50000).toLocaleString()} ${km ? "តួអក្សរសរុប" : "total characters included"}`)}`, km ? "សម្រាប់ការងារច្រើន" : "More room for larger projects", km ? "បើកប្រើក្រោយ Admin អនុម័ត" : "Access after admin approval"])}</ul>
           <button className="plan-button plan-button-outline" onClick={() => onVipClick("unlimited")} disabled={isLoggingIn}>{km ? "ជ្រើសរើស VIP" : "Choose VIP"}<ArrowRight size={17}/></button>
         </article>
       </div>
