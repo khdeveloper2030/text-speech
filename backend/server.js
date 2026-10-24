@@ -403,3 +403,10 @@ const PORT = Number(process.env.PORT) || 5000;
 app.listen(PORT, () => {
   console.log(`🚀 Node.js Express Server running on http://localhost:${PORT}`);
 });
+
+app.get("/healthz", (req, res) => {
+  res.status(200).json({
+    status: "ok",
+    message: "Backend is running"
+  });
+});

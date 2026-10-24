@@ -194,7 +194,7 @@ function App() {
   }, []);
 
   const t = TRANSLATIONS[appLang] || TRANSLATIONS.km;
-  const BACKEND_URL = process.env.REACT_APP_BACKEND_URL || "http://localhost:5000";
+  const BACKEND_URL = process.env.REACT_APP_BACKEND_URL;
 
   useEffect(() => {
     setDbLoading(true);
