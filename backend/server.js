@@ -19,7 +19,10 @@ function getFirebaseFirestore() {
   if (!firebaseAdminInstance) throw new Error("Firebase Admin is not initialized.");
   return firebaseAdminFirestore.getFirestore(firebaseAdminInstance);
 }
-const { MsEdgeTTS, OUTPUT_FORMAT } = require("msedge-tts");
+// Use Python edge-tts for Microsoft's current Edge TTS token protocol.
+// Install locally with: py -m pip install --upgrade edge-tts==7.3.1
+const { spawn } = require("child_process");
+const os = require("os");
 const googleTTS = require("google-tts-api"); // Kept to preserve your existing dependency/import.
 const fs = require("fs");
 const path = require("path");
@@ -166,7 +169,7 @@ function applyReadingStyle(text, style) {
   return clean;
 }
 
-function splitTextIntoChunks(text, maxLength = 200) {
+function splitTextIntoChunks(text, maxLength = 800) {
   const source = String(text || "");
   const chunks = [];
   let remaining = source.trim();
@@ -181,39 +184,108 @@ function splitTextIntoChunks(text, maxLength = 200) {
   return chunks;
 }
 
-async function generateSingleEdgeChunk(textChunk, voiceName, retries = 4) {
-  for (let attempt = 1; attempt <= retries; attempt++) {
+// Run Python edge-tts as a child process. This avoids the outdated v1 token
+// implementation in the old msedge-tts Node package that can return HTTP 403.
+function getPythonCommand() {
+  if (process.env.PYTHON_EXECUTABLE) return process.env.PYTHON_EXECUTABLE;
+  return process.platform === "win32" ? "py" : "python3";
+}
+
+async function generateSingleEdgeChunk(textChunk, voiceName, retries = 3) {
+  const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "khmer-tts-"));
+  const outputPath = path.join(tempDir, `speech-${Date.now()}-${Math.random().toString(16).slice(2)}.mp3`);
+  let lastError;
+
+  try {
+    for (let attempt = 1; attempt <= retries; attempt++) {
+      try {
+        const audio = await new Promise((resolveAttempt, rejectAttempt) => {
+          const pythonCommand = getPythonCommand();
+          const args = [
+            "-m", "edge_tts",
+            "--voice", voiceName,
+            "--text", textChunk,
+            "--write-media", outputPath
+          ];
+
+          console.log(`🐍 Python Edge TTS attempt ${attempt}/${retries} (${voiceName})...`);
+          const child = spawn(pythonCommand, args, {
+            windowsHide: true,
+            stdio: ["ignore", "ignore", "pipe"]
+          });
+
+          let stderr = "";
+          let settled = false;
+          const timeout = setTimeout(() => {
+            if (settled) return;
+            settled = true;
+            child.kill();
+            rejectAttempt(new Error("Python Edge TTS timed out after 90000 ms."));
+          }, 90000);
+
+          child.stderr.on("data", data => {
+            stderr += data.toString();
+            if (stderr.length > 12000) stderr = stderr.slice(-12000);
+          });
+
+          child.on("error", err => {
+            if (settled) return;
+            settled = true;
+            clearTimeout(timeout);
+            if (err.code === "ENOENT") {
+              rejectAttempt(new Error(
+                `Python executable "${pythonCommand}" was not found. Install Python and edge-tts, or set PYTHON_EXECUTABLE.`
+              ));
+            } else {
+              rejectAttempt(err);
+            }
+          });
+
+          child.on("close", code => {
+            if (settled) return;
+            settled = true;
+            clearTimeout(timeout);
+
+            if (code !== 0) {
+              rejectAttempt(new Error(
+                `Python edge-tts exited with code ${code}. ${stderr.trim() || "No diagnostic output."}`
+              ));
+              return;
+            }
+
+            try {
+              if (!fs.existsSync(outputPath)) {
+                rejectAttempt(new Error("Python edge-tts finished but did not create an MP3 file."));
+                return;
+              }
+              const audioBuffer = fs.readFileSync(outputPath);
+              if (!audioBuffer.length) {
+                rejectAttempt(new Error("Python edge-tts created an empty MP3 file."));
+                return;
+              }
+              resolveAttempt(audioBuffer);
+            } catch (readErr) {
+              rejectAttempt(readErr);
+            }
+          });
+        });
+
+        return audio;
+      } catch (err) {
+        lastError = err;
+        const message = String(err?.message || err || "Python Edge TTS error");
+        console.warn(`Python Edge TTS attempt ${attempt}/${retries} failed:`, message);
+        if (attempt >= retries || /\b403\b|forbidden|token/i.test(message)) break;
+        await sleep(Math.min(5000, 1000 * attempt));
+      }
+    }
+
+    throw lastError || new Error("Python edge-tts failed.");
+  } finally {
     try {
-      const tts = new MsEdgeTTS();
-      await tts.setMetadata(voiceName, OUTPUT_FORMAT.AUDIO_24KHZ_48KBITRATE_MONO_MP3);
-      const escapedText = textChunk
-        .replace(/&/g, "&amp;")
-        .replace(/</g, "&lt;")
-        .replace(/>/g, "&gt;");
-      const { audioStream } = await tts.toStream(escapedText);
-      const chunks = [];
-
-      const buffer = await new Promise((resolve, reject) => {
-        const timeout = setTimeout(() => reject(new Error("MsEdgeTTS stream timeout")), 20000);
-        audioStream.on("data", chunk => chunks.push(chunk));
-        audioStream.on("end", () => {
-          clearTimeout(timeout);
-          resolve(Buffer.concat(chunks));
-        });
-        audioStream.on("error", err => {
-          clearTimeout(timeout);
-          reject(err);
-        });
-      });
-
-      if (!buffer.length) throw new Error("Empty audio response from Edge TTS.");
-      return buffer;
-    } catch (err) {
-      const message = String(err?.message || err || "Edge TTS error");
-      const rateLimited = /\b429\b|too many requests|unexpected server response/i.test(message);
-      console.warn(`MsEdgeTTS attempt ${attempt}/${retries} failed${rateLimited ? " (rate limited)" : ""}:`, message);
-      if (attempt === retries) throw err;
-      await sleep(rateLimited ? Math.min(15000, 2000 * (2 ** (attempt - 1))) : 1000 * attempt);
+      fs.rmSync(tempDir, { recursive: true, force: true });
+    } catch (cleanupErr) {
+      console.warn("Could not clean temporary TTS files:", cleanupErr.message);
     }
   }
 }
@@ -299,13 +371,13 @@ app.post("/api/tts", async (req, res) => {
     const normalizedLang = String(lang || "km").toLowerCase();
     const styledText = applyReadingStyle(cleanText, characterStyle);
     const voiceName = getEdgeVoiceName(normalizedLang, voiceType, characterStyle);
-    const textChunks = splitTextIntoChunks(styledText, 200);
+    const textChunks = splitTextIntoChunks(styledText, 800);
     const combinedBuffer = await runEdgeTtsInQueue(async () => {
-      console.log(`🔊 Running Standard Edge TTS (${textChunks.length} chunk${textChunks.length === 1 ? "" : "s"})...`);
+      console.log(`🔊 Running Python Edge TTS 7.3.1 (${textChunks.length} chunk${textChunks.length === 1 ? "" : "s"})...`);
       const audioBuffers = [];
       for (let index = 0; index < textChunks.length; index++) {
         audioBuffers.push(await generateSingleEdgeChunk(textChunks[index], voiceName));
-        if (index < textChunks.length - 1) await sleep(350);
+        if (index < textChunks.length - 1) await sleep(100);
       }
       return Buffer.concat(audioBuffers);
     });
@@ -318,7 +390,7 @@ app.post("/api/tts", async (req, res) => {
       usage: { dailyUsed: cleanText.length, limit: 10000 }
     });
   } catch (err) {
-    console.error("❌ General TTS API Error:", err);
+    console.error("❌ General TTS API Error:", err?.message || err);
     return res.status(500).json({
       success: false,
       error: "មានបញ្ហាក្នុងការបង្កើតសំឡេង។ សូមព្យាយាមម្ដងទៀត។",
